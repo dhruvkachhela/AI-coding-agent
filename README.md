@@ -54,12 +54,12 @@ Instead of dividing code into arbitrary character windows (which splits function
 * **The Impact**: This change reduced the maximum chunk size from **22,956 tokens to 7,005 tokens** (corresponding to the monolithic `run_full_scan` function) and reduced the average chunk size from **707.18 to 422.77 tokens**.
 
 ### 2.2 Embedding Model Selection
-We evaluated three embedding options to find a model capable of supporting the codebase's long-tail distribution without chunk truncation:
-1. `sentence-transformers/all-MiniLM-L6-v2`: Context limit of 256 tokens. Truncated over 70% of our codebase chunks.
-2. `nvidia/nv-embedcode-v1`: Code-specialized, but limited to a 512-token context. This left a 5% long-tail gap of truncated chunks.
-3. `nvidia/llama-nemotron-embed-1b-v2`: General-purpose embedding model trained up to an 8,005-token context window.
+We evaluated embedding options to find a model capable of supporting the codebase's long-tail distribution without chunk truncation:
+1. `sentence-transformers/all-MiniLM-L6-v2`: Context limit of 256 tokens. Since the average chunk size of the codebase is 422.77 tokens (and 707.18 tokens pre-refactoring), this model would truncate a significant portion of our code chunks, losing critical logic.
+2. `nvidia/nv-embedcode-v1`: Code-specialized, but limited to a 512-token context. Since our 95th percentile chunk size is 1,553.40 tokens, a 512-token limit would still leave a substantial portion of our larger chunks truncated.
+3. `nvidia/llama-nemotron-embed-1b-v2`: General-purpose embedding model supporting up to an 8,192-token context window.
 
-**Decision**: We chose `llama-nemotron-embed-1b-v2` because ensuring that 100% of the codebase was fully represented without truncation was more critical for accuracy than using a code-specialized model with context limits. We specify `input_type="passage"` during indexing and `input_type="query"` during retrieval.
+**Decision**: We chose `llama-nemotron-embed-1b-v2` because ensuring that 100% of the codebase was fully represented without truncation was more critical for search accuracy than using a code-specialized model with strict context limits. We configure `input_type="passage"` during indexing to ingest files and `input_type="query"` during query retrieval.
 
 ### 2.3 Hybrid Search & RRF Fusion
 To combine semantic matching with exact keyword lookups, we implemented a hybrid search pipeline:
@@ -74,7 +74,7 @@ To combine semantic matching with exact keyword lookups, we implemented a hybrid
 We wired the search tool into a ReAct loop using LangGraph:
 * **State**: A TypedDict tracking the original question, a list of past `(thought, action, observation)` turns, the active query, the current thought, and the final answer.
 * **Iteration Cap**: Hard-capped at **5 cycles**. If exceeded, the agent executes a final summary call to synthesize all collected observations, returning a partial answer marked with `"Incomplete — max iterations reached"`.
-* **Reasoning Model**: **GLM-5.2** via the NVIDIA NIM API. In informal testing against *Gemini 3.5 Flash*, GLM-5.2 demonstrated significantly lower latency (completing 5-step agent loops in under 10 seconds compared to Llama/Gemini queues) and showed better instruction-following adherence when formatting `Thought:` and `Action:` blocks.
+* **Reasoning Model**: **GLM-5.2** via the NVIDIA NIM API. In testing, GLM-5.2 demonstrated significantly lower latency per turn compared to Llama 3.3 70B, making it highly practical for multi-turn agent loops.
 
 ---
 
@@ -103,7 +103,8 @@ Given the query: `"What is the overall flow from scanning a file to producing a 
 1. **Step 1 (Reasoning)**: The agent reasoned that it needed to locate the main orchestration process of the pipeline. It called the tool with query: `file scanning report generation orchestrator`.
 2. **Step 2 (Tool Observation)**: The tool returned code chunks from `orchestrator.py` showing helper methods like `merge_proximity_findings` and `_merge_subgroup`. 
 3. **Step 3 (Reasoning)**: The agent read the code, recognized that these were helper routines inside the orchestration module, and reasoned that it needed to inspect how these layers were coordinated and how reports were generated. It issued a second query: `vibesec pipeline orchestrator layer9 report generation`.
-4. **Step 5 (Synthesis & Final Answer)**: The agent successfully mapped the entire sequence:
+4. **Step 4 (Tool Observation)**: The tool returned the main entry point `run_full_scan` in `orchestrator.py` and `generate_report` in `layer9_report.py`.
+5. **Step 5 (Synthesis & Final Answer)**: The agent successfully mapped the entire sequence:
    * It identified that `orchestrator.py` coordinates the execution flow (from Layer 0 indexing up to Layer 7 validation).
    * It identified that `layer9_report.py` takes the final findings and generates the formatted results.
    * It named `run_full_scan` as the entry function.
