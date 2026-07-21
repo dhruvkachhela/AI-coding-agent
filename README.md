@@ -1,6 +1,6 @@
 # Codebase RAG Agent with Grounding Verifier
 
-A production-grade, ReAct-style codebase QA agent built from scratch using **LangGraph**, **Tree-sitter**, **ChromaDB**, **BM25**, and a secondary **Grounding Critic / Verifier LLM**. The agent dynamically navigates repositories using hybrid retrieval (dense embedding + field-weighted BM25 with Reciprocal Rank Fusion) and enforces zero-hallucination guarantees via an automated verification feedback loop.
+A production-grade, ReAct-style codebase QA agent built from scratch using **LangGraph**, **Tree-sitter**, **ChromaDB**, **BM25**, and a secondary **Grounding Critic / Verifier LLM**. The agent dynamically navigates repositories using hybrid retrieval (dense embedding + field-weighted BM25 with Reciprocal Rank Fusion) and enforces low-hallucination guarantees via an automated verification feedback loop.
 
 The system was evaluated and tested end-to-end against **VibeCheck Scan / VibeSec Pipeline** (a 9-layer AI-driven static application security testing scanner containing cross-file imports, database schemas, and AI-triage engines).
 
