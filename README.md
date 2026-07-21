@@ -117,11 +117,6 @@ When `reasoning_node` produces a `Final Answer`, the graph routes to `verifier_n
 - **If Unsupported & Attempts >= 2**:
   - The graph appends `[WARNING: Partially Grounded]` with the verifier feedback to the final answer and routes to `END` to prevent infinite loops.
 
-### D. Robust Verdict Parsing
-To handle minor LLM formatting/spelling variations (such as `VERDICT: SUPPORTD`), the router uses:
-```python
-upper_text = verifier_text.upper()
-is_grounded = "VERDICT: SUPPORT" in upper_text and "VERDICT: UNSUPPORT" not in upper_text
 ```
 
 ---
