@@ -81,8 +81,7 @@ To combine deep semantic vector matching with exact symbol/variable lookups:
   * `metadata_index` (File path, Class name, Method name) — Weight: **3.0**
   * `body_index` (Raw source code) — Weight: **1.0**
 * **Fusion**: Top 20 candidates from both streams are fused using **Reciprocal Rank Fusion (RRF)**:
-  $$\text{RRF\_Score} = \frac{1}{60 + \text{Rank}_{\text{dense}}} + \frac{1}{60 + \text{Rank}_{\text{BM25}}}$$
-
+  RRF_Score(d)=(1/(k+Rankdense​(d))) ​+ (1/(k+RankBM25​(d)1))​
 ---
 
 ## 2.4 Grounding Critic & Verifier LLM (Anti-Hallucination Loop)
