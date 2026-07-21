@@ -117,8 +117,6 @@ When `reasoning_node` produces a `Final Answer`, the graph routes to `verifier_n
 - **If Unsupported & Attempts >= 2**:
   - The graph appends `[WARNING: Partially Grounded]` with the verifier feedback to the final answer and routes to `END` to prevent infinite loops.
 
-```
-
 ---
 
 ## 3. Empirical Evaluation & Trace Verification
