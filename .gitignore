@@ -1,0 +1,13 @@
+# Python & Virtualenv
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Local Chroma Vector DB & Test DBs
+chroma_db/
+test_chroma_db/
+
+# Scratch & IDE
+scratch/
+.agents/
