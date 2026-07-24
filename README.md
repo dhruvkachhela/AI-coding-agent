@@ -32,53 +32,49 @@ This project resolves these challenges by implementing a **Dual-Mode LangGraph S
                                     |   (Llama-3.1-8B | Temp 0.0)        |
                                     +-------------------+----------------+
                                                         |
-                                       [QA vs FIX_PROPOSAL Classification]
-                                                        |
                                                         v
-     +--------------------------------------------------+<------------------------------------+
-     |                                                  |                                     |
-     |                              +-------------------+----------------+                    |
-     |                              |          Reasoning Node            |<---------------+   |
-     |                              |   (Llama-3.1-8B | Temp 0.1)        |                |   |
-     |                              +-------------------+----------------+                |   |
-     |                                                  |                                 |   |
-     |                                    [Conditional Edge Decision]                     |   |
-     |                                                  |                                 |   |
-     |                                  Is there a Final Answer?                          |   |
-     |                                    /                     \                         |   |
-     |                                  Yes                      No (Search Action)       |   |
-     |                                  /                         \                       |   |
-     |                                 v                           v                      |   |
-     |                        Category 1 or 2?             +-------+--------+             |   |
-     |                        /              \             |   Tool Node    |             |   |
-     |                       /                \            | (Hybrid Search)|             |   |
-     |                 Category 1          Category 2      +-------+--------+             |   |
-     |                     /                    \                  |                      |   |
-     |                    v                      v                 v                      |   |
-     |        +-------+-------+          +-------+-------+ +-------+--------+             |   |
-     |        | Verifier Node |          | Fix Proposal  |<| Dense  + BM25  |<------------+   |
-     |        | (Grounding)   |          | (Codestral)   | |   RRF Fusion   |                 |
-     |        +-------+-------+          +-------+-------+ +----------------+                 |
-     |                |                          |                                        |
-     |         [Grounding Check]                 v                                        |
-     |          /           \            +-------+-------+                                |
-     |     Supported     Unsupported     | Execution     |                                |
-     |       /               \           | Verifier      |                                |
-     |      v                 v          +-------+-------+                                |
-     |   +-----+      (Self-Correction:          |                                        |
-     |   | END |       QA Re-Reason)             v                                        |
-     |   +-----+              |          [Test Status Check]                              |
-     |                        |          /                 \                              |
-     |                        |      Passed               Failed                          |
-     |                        |        /                     \                            |
-     |                        |       v                       v                           |
-     |                        |    +-----+            (Self-Correction:                   |
-     |                        |    | END |             Fix Patch Retry)                   |
-     |                        |    +-----+                    |                           |
-     |                        |                               |                           |
-     +------------------------+-------------------------------+                           |
-                              |                                                           |
-                              +-----------------------------------------------------------+
+     +--------------------------------------------------+---------------------------------------+
+     |                                                  |                                       |
+     |                              +-------------------+----------------+                      |
+     |                              |          Reasoning Node            |<-----------------+   |
+     |                              |   (Llama-3.1-8B | Temp 0.1)        |                  |   |
+     |                              +-------------------+----------------+                  |   |
+     |                                                  |                                   |   |
+     |                                    [Conditional Edge Decision]                       |   |
+     |                                                  |                                   |   |
+     |                                  Is there a Final Answer?                            |   |
+     |                                    /                     \                           |   |
+     |                                  Yes                      No (Search Action)         |   |
+     |                                  /                         \                         |   |
+     |                                 v                           v                        |   |
+     |                        Category 1 or 2?             +-------+--------+               |   |
+     |                        /              \             |   Tool Node    |               |   |
+     |                       /                \            | (Hybrid Search:|               |   |
+     |                 Category 1          Category 2      |  Dense + BM25  |               |   |
+     |                     /                    \          |  RRF Fusion)   |               |   |
+     |                    v                      v         +-------+--------+               |   |
+     |        +-------+-------+          +-------+-------+         |                        |   |
+     |        | Verifier Node |          | Fix Proposal  |         | (Appends Observation)  |   |
+     |        | (Grounding)   |          | (Codestral)   |         +------------------------+   |
+     |        +-------+-------+          +-------+-------+                                      |
+     |                |                          |                                              |
+     |         [Grounding Check]                 v                                              |
+     |          /           \            +-------+-------+                                      |
+     |     Supported     Unsupported     | Execution     |                                      |
+     |       /               \           | Verifier      |                                      |
+     |      v                 v          +-------+-------+                                      |
+     |   +-----+      (Self-Correction:          |                                              |
+     |   | END |       QA Re-Reason)             v                                              |
+     |   +-----+              |          [Test Status Check]                                    |
+     |                        |          /                 \                                    |
+     |                        |      Passed               Failed                                |
+     |                        |        /                     \                                  |
+     |                        |       v                       v                                 |
+     |                        |    +-----+            (Self-Correction:                         |
+     |                        |    | END |             Fix Patch Retry)                         |
+     |                        |    +-----+                    |                                 |
+     |                        |                               |                                 |
+     +------------------------+-------------------------------+---------------------------------+
 ```
 
 ### 2.1 AST-Based Structural Chunking (Method-Level)
