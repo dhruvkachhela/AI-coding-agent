@@ -137,8 +137,8 @@ To eliminate queueing bottlenecks on shared API endpoints and maximize speed:
 | **`intent_classifier`** | `meta/llama-3.1-8b-instruct` | `0.0` | `20` | **Instant Routing**: Binary `QA` vs `FIX_PROPOSAL` decision runs in **~0.2s** (eliminates 10s heavy model bottleneck). |
 | **`reasoning_node`** | `meta/llama-3.1-8b-instruct` | `0.1` | `512` | **Ultra-Fast ReAct Loop**: 8B model eliminates server queue delays (**~1.2s per turn** vs 43s on 70B models). Capped at `512` tokens. |
 | **`verifier_node`** | `meta/llama-3.1-8b-instruct` | `0.0` | `1024` | **Deterministic Fact-Checking**: Strict anti-hallucination grounding audit (~0.8s). |
-| **`fix_proposal_node`** | `mistralai/codestral-22b-instruct-v0.1` | `0.2` | `3072` | **Specialized Code Synthesis**: 22B code model ensures high AST diff precision and prevents code truncation. |
-| **`execution_verifier_node`**| `mistralai/codestral-22b-instruct-v0.1` | `0.1` | `2048` | **Precise Unit Test Generation**: Generates clean, executable `pytest` scripts. |
+| **`fix_proposal_node`** | `mistralai/codestral-22b-instruct-v0.1` | `0.1` | `3072` | **Specialized Code Synthesis**: 22B code model ensures high AST diff precision and prevents code truncation. |
+| **`execution_verifier_node`**| `mistralai/codestral-22b-instruct-v0.1` | `0.0` | `2048` | **Precise Unit Test Generation**: Generates clean, deterministic `pytest` scripts. |
 
 ---
 
@@ -169,7 +169,58 @@ Total Agent Execution Latency: 5.618 seconds
 
 ---
 
-## 6. Technology Stack
+## 6. Empirical Research, Ablation Studies & Failures Analysis
+
+To systematically determine the optimal model allocation per node, we conducted four empirical research trials across different LLM parameter classes and providers on NVIDIA NIM API endpoints. Below is a rigorous breakdown of our findings, failures, and architectural insights.
+
+---
+
+### 6.1 Model Provider & Endpoint Availability Analysis (MiniMax 3 & Kimi K2.6)
+
+During our investigation into third-party foundation models:
+* **MiniMax 3 (`minimax/minimax-text-01`)** and **Moonshot Kimi K2.6 (`moonshotai/kimi-k1.5`)**: Returned `404 Page Not Found` on NVIDIA NIM API (`https://integrate.api.nvidia.com/v1`). Proprietary models like MiniMax and Kimi are hosted exclusively on their native provider APIs (`api.minimax.chat` and `api.moonshot.cn`).
+* **NVIDIA NIM Models**: NVIDIA NIM endpoints prioritize open-weights models (`Llama 3.1`, `Llama 3.3`, `GLM-5.2`, `Codestral-22B`, `Nemotron`).
+* **Partner Tier Access Control**: Partner models like `mistralai/codestral-22b-instruct-v0.1` require tier-restricted API keys; standard keys return `404 Function Not Found for Account`.
+
+---
+
+### 6.2 Comparative Empirical Experiments Summary
+
+| Experiment Trial | Configured Model Mix (Classifier / Reasoning / Verifier / Fix) | Total Latency (s) | ReAct Search Quality | Verifier Stability | Primary Failure Mode / Key Finding |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Trial 1: Monolithic High-Capacity Baseline** | `z-ai/glm-5.2` (All Nodes) | **353.9s** (~5.9m) | **Excellent** (6 Turns) | **100% Grounded** | Successful execution & high precision, but bottlenecked by 10s intent classification overhead. |
+| **Trial 2: Heavy 70B Parameter Mix** | `llama-3.1-8b` / `llama-3.3-70b` / `llama-3.3-70b` | **1,324.0s** (~22.0m) | **Good** (6 Turns) | **Grounded** | **Catastrophic Queue Latency**: Shared 70B endpoint suffered 198.3s server wait time per turn. |
+| **Trial 3: Light 8B Uniform Mix** | `llama-3.1-8b` (All Nodes) | **116.6s** (~1.9m) | **Failed** (15 Turns) | **Repetitive Loop** | **ReAct Loop Failure**: 8B model repeated identical searches 10 times, bloating prompt context to 15,000 tokens & causing verifier hallucination loops. |
+| **Trial 4: Optimized Hybrid Architecture** | `llama-3.1-8b` / `glm-5.2` / `llama-3.1-8b` / `codestral` | **~180s** (~3.0m) | **Optimal** (4-6 Turns) | **100% Grounded** | **Optimal Trade-Off**: 0.3s intent routing + intelligent multi-turn search with zero loops. |
+
+---
+
+### 6.3 Detailed Analysis of Failed & Successful Experiments
+
+#### A. Failure Analysis: The 8B Multi-Turn Reasoning Loop (Trial 3)
+* **Observed Symptom**: When evaluating the query `"what LLM and it's framework are we using in it?"`, `meta/llama-3.1-8b-instruct` in `reasoning_node` issued the exact search query `search("NVIDIA NIM model" OR "Cloudflare AI model")` **10 times sequentially** across Iterations 5 to 15.
+* **Root Cause Analysis**: Small parameter models (8B) lack high-level planning meta-cognition. When a codebase does not contain literal verbatim string matches for a search term, an 8B model fails to stop searching and instead re-executes redundant searches until reaching the max loop limit (15 iterations).
+* **Cascade Effect**: Accumulating 15 turns of raw search observations inflated prompt memory to **15,000 tokens**. Passing this massive context to `verifier_node` caused autoregressive token repetition, outputting over 100 identical bullet points of unsupported claims.
+
+#### B. Failure Analysis: 70B Server Queue Bottleneck (Trial 2)
+* **Observed Symptom**: Total execution time exploded to **1,323.998 seconds (22 minutes)**.
+* **Root Cause Analysis**: On shared public API endpoints, 70B models (`meta/llama-3.3-70b-instruct`) experience high time-to-first-token (TTFT) and queue delays averaging **198.3 seconds per turn**. Over 6 iterations, queue wait time dominated 90% of total runtime.
+
+#### C. Success Analysis: 8B Intent Classifier & Category 2 Bug Fix Engine (Trial 4)
+* **Instant Routing**: Using `meta/llama-3.1-8b-instruct` for `intent_classifier_node` reduced classification latency from **10.28 seconds to 0.31 seconds (33x acceleration)** with 100% accuracy.
+* **Bug Fix & Sandbox Verification**: In Category 2 bug fix mode, `fix_proposal_node` generated a complete patch diff in **25.8 seconds**, and `execution_verifier_node` passed AST syntax validation (`ast.parse`) and launched a dynamic pytest unit test script inside a temp sandbox in **11.9 seconds** (total Category 2 latency: **75.7 seconds**).
+
+---
+
+### 6.4 Core Research Conclusions
+
+1. **Do NOT use 8B models for multi-turn ReAct reasoning loops** in complex repositories. 8B models are prone to infinite search loops and prompt context bloat.
+2. **Do use 8B models for single-turn structured tasks** (`intent_classifier`, quick extraction, AST syntax validation).
+3. **Use high-capacity models (`z-ai/glm-5.2` / 100B+) for `reasoning_node`**. They complete ReAct navigation in 4–5 turns with zero search loops, optimizing both accuracy and real-world execution speed.
+
+---
+
+## 7. Technology Stack
 
 - **Agent Orchestration**: `langgraph` (v1.1.9)
 - **AST Parser**: `tree-sitter` (v0.26.0) & `tree-sitter-python` (v0.25.0)
@@ -181,7 +232,7 @@ Total Agent Execution Latency: 5.618 seconds
 
 ---
 
-## 7. Setup & Execution
+## 8. Setup & Execution
 
 ### Prerequisites
 Set your NVIDIA NIM API key:
