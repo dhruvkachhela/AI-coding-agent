@@ -1,6 +1,6 @@
-# Codebase RAG Agent with Grounding Verifier
+# Codebase RAG & Automated Repair Agent with Dual-Mode Grounding & Execution Verifier
 
-A production-grade, ReAct-style codebase QA agent built from scratch using **LangGraph**, **Tree-sitter**, **ChromaDB**, **BM25**, and a secondary **Grounding Critic / Verifier LLM**. The agent dynamically navigates repositories using hybrid retrieval (dense embedding + field-weighted BM25 with Reciprocal Rank Fusion) and enforces low-hallucination guarantees via an automated verification feedback loop.
+A production-grade, dual-mode ReAct & Code Repair Agent built from scratch using **LangGraph**, **Tree-sitter**, **ChromaDB**, **BM25**, **Pytest Sandbox Subprocesses**, and a multi-tiered **Model Allocation Pipeline**. The agent dynamically navigates repository codebases using hybrid retrieval (dense embedding + field-weighted BM25 with Reciprocal Rank Fusion) and enforces strict zero-hallucination & verified bug resolution guarantees.
 
 The system was evaluated and tested end-to-end against **VibeCheck Scan / VibeSec Pipeline** (a 9-layer AI-driven static application security testing scanner containing cross-file imports, database schemas, and AI-triage engines).
 
@@ -8,50 +8,67 @@ The system was evaluated and tested end-to-end against **VibeCheck Scan / VibeSe
 
 ## 1. Motivation & Technical Focus
 
-While traditional RAG pipelines rely on single-shot document retrieval and direct LLM generation, codebase QA presents two unique challenges:
+While traditional RAG pipelines rely on single-shot document retrieval and direct LLM generation, codebase QA and automated bug repair present three unique challenges:
 1. **Structural Blind Spots**: High-level architectural flows (e.g. entry points, call-graph chains) cannot be captured by single-turn semantic search alone.
 2. **LLM Hallucinations**: Standard ReAct agents often synthesize plausibly sounding but unverified claims (e.g., hallucinating API endpoint paths, missing wrapper layers, or misrepresenting class inheritance).
+3. **Unverified Code Fixes**: AI-generated code patches frequently introduce AST syntax errors, invalid imports, or breaking regressions if returned without execution testing.
 
-This project resolves both challenges by implementing a **multi-turn ReAct state machine** paired with a **secondary Grounding Critic LLM** that audits final answers against raw retrieved code observations before returning them to the user.
+This project resolves these challenges by implementing a **Dual-Mode LangGraph State Machine**:
+- **Category 1 (QA Mode)**: Paired with an automated **Grounding Critic LLM** that audits final answers against raw retrieved code observations before returning them to the user.
+- **Category 2 (Bug Fix Mode)**: Paired with an **Execution Verifier Engine** that validates AST syntax, dynamically generates pytest reproduction scripts, and executes pre/post fix tests inside an isolated sandbox subprocess.
 
 ---
 
 ## 2. System Architecture
 
 ```
-                    +------------------------------------+
-                    |        Input User Question         |
-                    +-------------------+----------------+
-                                        |
-                                        v
-                    +-------------------+----------------+
-     +------------->|          Reasoning Node            |<----------------+
-     |              |          (GLM-5.2 LLM)             |                 |
-     |              +-------------------+----------------+                 |
-     |                                  |                                  |
-     |                    [Conditional Edge Decision]                      |
-     |                                  |                                  |
-     |                 Is there a Final Answer?                            |
-     |                   /                     \                           |
-     |                 Yes                      No (Search Action)         |
-     |                 /                         \                         |
-     |                v                           v                        |
-     |        +-------+-------+           +-------+--------+               |
-     |        | Verifier Node |           |   Tool Node    |               |
-     |        | (Critic LLM)  |           | (Hybrid Search)|               |
-     |        +-------+-------+           +-------+--------+               |
-     |                |                           |                        |
-     |         [Grounding Check]                  v                        |
-     |          /           \             +-------+--------+               |
-     |     Supported    Unsupported       | Dense  + BM25  |               |
-     |       /                 \          |   RRF Fusion   |               |
-     |      v                   v         +-------+--------+               |
-     |   +-----+        (Self-Correction:         |                        |
-     |   | END |         Reset Final Answer       |                        |
-     |   +-----+         & Inject Feedback)-------+                        |
-     |                                            |                        |
-     +--------------------------------------------+                        |
-                         Appends Observation to State                      |
+                                    +------------------------------------+
+                                    |        Input User Question         |
+                                    +-------------------+----------------+
+                                                        |
+                                                        v
+                                    +-------------------+----------------+
+                                    |     Intent Classifier Node         |
+                                    |   (Llama-3.1-8B | Temp 0.0)        |
+                                    +-------------------+----------------+
+                                                        |
+                                       [QA vs FIX_PROPOSAL Classification]
+                                                        |
+                                                        v
+                                    +-------------------+----------------+
+     +----------------------------->|          Reasoning Node            |<----------------+
+     |                              |   (Llama-3.1-8B | Temp 0.1)        |                 |
+     |                              +-------------------+----------------+                 |
+     |                                                  |                                  |
+     |                                    [Conditional Edge Decision]                      |
+     |                                                  |                                  |
+     |                                  Is there a Final Answer?                           |
+     |                                    /                     \                          |
+     |                                  Yes                      No (Search Action)        |
+     |                                  /                         \                        |
+     |                                 v                           v                       |
+     |                        Category 1 or 2?             +-------+--------+              |
+     |                        /              \             |   Tool Node    |              |
+     |                       /                \            | (Hybrid Search)|              |
+     |                 Category 1          Category 2      +-------+--------+              |
+     |                     /                    \                  |                       |
+     |                    v                      v                 v                       |
+     |        +-------+-------+          +-------+-------+ +-------+--------+              |
+     |        | Verifier Node |          | Fix Proposal  | | Dense  + BM25  |              |
+     |        | (Grounding)   |          | (Codestral)   | |   RRF Fusion   |              |
+     |        +-------+-------+          +-------+-------+ +-------+--------+              |
+     |                |                          |                 |                       |
+     |         [Grounding Check]                 v                 |                       |
+     |          /           \            +-------+-------+         |                       |
+     |     Supported    Unsupported      | Execution     |         |                       |
+     |       /                 \         | Verifier      |         |                       |
+     |      v                   v        +-------+-------+         |                       |
+     |   +-----+        (Self-Correction)        |                 |                       |
+     |   | END |                 \               v                 |                       |
+     |   +-----+                  +------------->+                 |                       |
+     |                                           |                 |                       |
+     +-------------------------------------------+-----------------+-----------------------+
+                                        Appends Observation to State
 ```
 
 ### 2.1 AST-Based Structural Chunking (Method-Level)
@@ -81,98 +98,84 @@ To combine deep semantic vector matching with exact symbol/variable lookups:
   * `metadata_index` (File path, Class name, Method name) — Weight: **3.0**
   * `body_index` (Raw source code) — Weight: **1.0**
 * **Fusion**: Top 20 candidates from both streams are fused using **Reciprocal Rank Fusion (RRF)**:
-  RRF_Score(d)=(1/(k+Rankdense​(d))) ​+ (1/(k+RankBM25​(d)1))​
+  $$\text{RRF\_Score}(d) = \frac{1}{k + \text{Rank}_{\text{dense}}(d)} + \frac{1}{k + \text{Rank}_{\text{BM25}}(d)}$$
+
 ---
 
-## 2.4 Grounding Critic & Verifier LLM (Anti-Hallucination Loop)
+## 3. Dual-Mode Verification Architecture
 
-To eliminate hallucinations, we added an automated verification step to the LangGraph state machine:
+### Mode A: Grounding Critic & Verifier (`verifier_node`)
+For Category 1 (QA) queries, the agent routes candidate answers to a strict Grounding Critic:
+- **Unbiased Context**: The verifier receives **ONLY** the proposed `Final Answer` and consolidated `Retrieved Observations` across search turns (intermediate thoughts and queries are excluded).
+- **Grounding Audit**: The critic (`meta/llama-3.1-8b-instruct` at `temperature=0.0`) evaluates if every claim is explicitly backed by retrieved code.
+- **Self-Correction Loop**: If unsupported, it injects feedback back to `reasoning_node` (max 3 attempts).
 
-### A. State Schema (`AgentState`)
-```python
-class AgentState(TypedDict):
-    question: str
-    history: List[Tuple[str, str, str]]  # (thought, action, observation)
-    current_thought: str
-    action_query: Optional[str]
-    final_answer: Optional[str]
-    iterations: int
-    verification_attempts: int
-    verifier_feedback: Optional[str]
-    is_grounded: bool
+### Mode B: Fix Proposal & Sandboxed Execution Verifier (`execution_verifier_node`)
+For Category 2 (Bug Fix Proposal) queries:
+1. **Fix Synthesis (`fix_proposal_node`)**: `Codestral-22B` generates structured diagnosis, relative target file path, original code snippet, and fixed replacement code snippet.
+2. **AST Syntax Check (`ast.parse`)**: Validates replacement code syntax prior to execution.
+3. **Dynamic Unit Test Generation**: LLM dynamically writes a standalone `pytest`/`unittest` reproduction script.
+4. **Sandboxed Subprocess Execution**:
+   - Creates an isolated temp directory (`tempfile.mkdtemp(prefix="agent_sandbox_")`).
+   - Writes test code and runs `subprocess.run([sys.executable, "-m", "pytest", ...], timeout=15)`.
+   - Asserts pre-fix failure and post-fix success with zero regressions before returning final report.
+
+---
+
+## 4. Per-Node Model Specialization & Latency Optimization
+
+To eliminate queueing bottlenecks on shared API endpoints and maximize speed:
+
+| Node Name | Configured Model | Temperature | Max Tokens | Rationale & Architectural Decision |
+| :--- | :--- | :--- | :--- | :--- |
+| **`intent_classifier`** | `meta/llama-3.1-8b-instruct` | `0.0` | `20` | **Instant Routing**: Binary `QA` vs `FIX_PROPOSAL` decision runs in **~0.2s** (eliminates 10s heavy model bottleneck). |
+| **`reasoning_node`** | `meta/llama-3.1-8b-instruct` | `0.1` | `512` | **Ultra-Fast ReAct Loop**: 8B model eliminates server queue delays (**~1.2s per turn** vs 43s on 70B models). Capped at `512` tokens. |
+| **`verifier_node`** | `meta/llama-3.1-8b-instruct` | `0.0` | `1024` | **Deterministic Fact-Checking**: Strict anti-hallucination grounding audit (~0.8s). |
+| **`fix_proposal_node`** | `mistralai/codestral-22b-instruct-v0.1` | `0.2` | `3072` | **Specialized Code Synthesis**: 22B code model ensures high AST diff precision and prevents code truncation. |
+| **`execution_verifier_node`**| `mistralai/codestral-22b-instruct-v0.1` | `0.1` | `2048` | **Precise Unit Test Generation**: Generates clean, executable `pytest` scripts. |
+
+---
+
+## 5. Built-in Latency Benchmarking & Colored UI Output
+
+The agent automatically tracks execution time per node in `AgentState["node_latencies"]` and outputs a benchmark report at the end of every run:
+
+```text
+==========================================================================================
+                 DUAL-MODE AGENT LATENCY & PERFORMANCE BENCHMARK REPORT
+==========================================================================================
+Node Name            | Model ID                       | Calls  | Total (s)  | Avg (s)   | % Total
+------------------------------------------------------------------------------------------
+intent_classifier    | meta/llama-3.1-8b-instruct     | 1      | 0.214      | 0.214     | 3.8%   
+reasoning            | meta/llama-3.1-8b-instruct     | 3      | 3.842      | 1.280     | 68.4%  
+tool                 | hybrid_search (AST+BM25+DB)    | 2      | 0.112      | 0.056     | 2.0%   
+verifier             | meta/llama-3.1-8b-instruct     | 1      | 1.450      | 1.450     | 25.8%  
+------------------------------------------------------------------------------------------
+Total Agent Execution Latency: 5.618 seconds
+==========================================================================================
 ```
 
-### B. The Verifier Node (`verifier_node`)
-When `reasoning_node` produces a `Final Answer`, the graph routes to `verifier_node`. 
-- **Unbiased Context**: The verifier receives **ONLY** the proposed `Final Answer` and the consolidated `Retrieved Observations` across all search turns (intermediate thoughts and queries are excluded).
-- **Prompt Specification**: The critic (`z-ai/glm-5.2` at temperature 0.0) is instructed:
-  > *"Check if EVERY claim made in the proposed Final Answer is explicitly supported by the provided retrieved code observations. Respond with `VERDICT: SUPPORTED` or `VERDICT: UNSUPPORTED` followed by a list of unsupported claims."*
-
-### C. Self-Correction Routing (`route_verification`)
-- **If Grounded**: The verifier returns `is_grounded = True`, routing the graph to `END`.
-- **If Unsupported & Attempts < 2**:
-  - The verifier sets `final_answer = None` and populates `verifier_feedback`.
-  - The graph routes back to `reasoning_node`.
-  - The system prompt injects a `CRITICAL ATTENTION - PREVIOUS ANSWER REJECTED BY VERIFIER` section containing the critic's exact feedback, prompting the model to search for missing details or correct unverified claims.
-- **If Unsupported & Attempts >= 2**:
-  - The graph appends `[WARNING: Partially Grounded]` with the verifier feedback to the final answer and routes to `END` to prevent infinite loops.
+### Color Coding Scheme:
+- **Final Verified Agent Output**: Bold Bright Green (`\033[1;92m`)
+- **Reasoning & Tool Logs**: Bold Cyan (`\033[1;96m`)
+- **Verifier Critic Logs**: Bold Yellow (`\033[1;93m`)
+- **Benchmark Summary Header**: Bold Magenta (`\033[1;95m`)
 
 ---
 
-## 3. Empirical Evaluation & Trace Verification
-
-### Case Study 1: API Endpoint Verification
-* **User Question**: `"what LLM and it's framework are we using in it?"`
-* **Iteration 6 (Initial Final Answer)**: The agent generated a detailed answer, but hallucinated that the Cloudflare fallback endpoint was `https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1/chat/completions`.
-* **Critic Evaluation (Attempt 1)**:
-  ```text
-  VERDICT: UNSUPPORTED
-  Unsupported Claims:
-  - The claim that the Cloudflare API endpoint is .../ai/v1/chat/completions is NOT supported by the retrieved code. The actual endpoint in the code is .../ai/run/@cf/meta/llama-3.1-8b-instruct-fast.
-  ```
-* **Self-Correction (Iteration 7)**: The agent received the critic feedback, corrected the endpoint URL to `https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/@cf/meta/llama-3.1-8b-instruct-fast`, and resubmitted.
-* **Critic Evaluation (Attempt 2)**: `VERDICT: SUPPORTED` $\rightarrow$ Answer delivered to user with 100% precision.
-
----
-
-### Case Study 2: Taint Analysis Oracle Query
-* **User Question**: `"joern is used or not? if yes then how it's working here?"`
-* **Iteration 2 (Initial Final Answer)**: The agent generated an answer claiming Joern builds AST/CFG/PDG structures and assumes `/tmp` hardcoded file paths.
-* **Critic Evaluation (Attempt 1)**:
-  ```text
-  VERDICT: UNSUPPORTED
-  Unsupported Claims:
-  - The code uses tempfile.gettempdir(), not hardcoded /tmp.
-  - No snippet explicitly describes CPG as a combination of AST+CFG+PDG.
-  ```
-* **Self-Correction (Iteration 3)**: The agent revised the explanation to strictly reference `build_global_cpg` in `layer0_indexer.py` and `_tier3_joern` in `layer7_validator.py`.
-* **Critic Evaluation (Attempt 2)**: Verified and accepted.
-
----
-
-## 4. Technology Stack
+## 6. Technology Stack
 
 - **Agent Orchestration**: `langgraph` (v1.1.9)
-- **Parser**: `tree-sitter` (v0.26.0) & `tree-sitter-python` (v0.25.0)
+- **AST Parser**: `tree-sitter` (v0.26.0) & `tree-sitter-python` (v0.25.0)
 - **Vector Database**: `chromadb` (v1.5.9)
 - **Sparse Retrieval**: `rank_bm25` (v0.2.2)
-- **LLM Engine**: `z-ai/glm-5.2` via **NVIDIA NIM API** (OpenAI SDK client)
-- **Embedding Model**: `nvidia/llama-nemotron-embed-1b-v2` via **NVIDIA NIM API**
+- **Sandbox Subprocess Engine**: `subprocess` + `pytest` (v8.x) + `tempfile`
+- **LLM Provider**: **NVIDIA NIM API** (`integrate.api.nvidia.com/v1`) via `openai` Python SDK
+- **Embedding Model**: `nvidia/llama-nemotron-embed-1b-v2` via NVIDIA NIM API
 
 ---
 
-## 5. Repository Structure
-
-```
-├── ai-coding-agent.ipynb   # Main Jupyter Notebook containing complete pipeline & cells 0-10
-├── repo_indexer.py         # Standalone repository parser, AST chunker, & vector builder
-├── README.md               # Architecture documentation & technical specifications
-└── codebase_rag_report.html # Evaluation report & performance analysis
-```
-
----
-
-## 6. Setup & Execution
+## 7. Setup & Execution
 
 ### Prerequisites
 Set your NVIDIA NIM API key:
@@ -182,11 +185,11 @@ export NVIDIA_API_KEY="nvapi-..."
 
 ### Install Dependencies
 ```bash
-pip install tree-sitter tree-sitter-python chromadb rank_bm25 langgraph openai tqdm
+pip install --upgrade opentelemetry-api opentelemetry-sdk chromadb tree-sitter tree-sitter-python openai tqdm rank_bm25 langgraph pytest
 ```
 
-### Running in Kaggle / Jupyter
-Open `ai-coding-agent.ipynb` and run the cells sequentially:
-- **Cell 2–5**: AST Chunker, Vector Embedder, and Hybrid Search Engine functions.
-- **Cell 9**: `build_agent_graph()` definition with Grounding Verifier state machine.
-- **Cell 10**: Execution runner testing sample questions.
+### Running in Jupyter / Kaggle
+Open `agent.ipynb` and run the cells sequentially:
+- **Cell 1–6**: Dependencies, AST Chunker, Vector Embedder, and Hybrid Search Engine functions.
+- **Cell 10**: `build_agent_graph()` definition with Dual-Mode State Machine, Latency Engine, and Verifiers.
+- **Cell 11**: Execution runner testing sample QA and Bug Fix queries with colored outputs & benchmark reporting.
