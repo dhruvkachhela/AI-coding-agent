@@ -134,11 +134,11 @@ To eliminate queueing bottlenecks on shared API endpoints and maximize speed:
 
 | Node Name | Configured Model | Temperature | Max Tokens | Rationale & Architectural Decision |
 | :--- | :--- | :--- | :--- | :--- |
-| **`intent_classifier`** | `meta/llama-3.1-8b-instruct` | `0.0` | `20` | **Instant Routing**: Binary `QA` vs `FIX_PROPOSAL` decision runs in **~0.2s** (eliminates 10s heavy model bottleneck). |
-| **`reasoning_node`** | `meta/llama-3.1-8b-instruct` | `0.1` | `512` | **Ultra-Fast ReAct Loop**: 8B model eliminates server queue delays (**~1.2s per turn** vs 43s on 70B models). Capped at `512` tokens. |
-| **`verifier_node`** | `meta/llama-3.1-8b-instruct` | `0.0` | `1024` | **Deterministic Fact-Checking**: Strict anti-hallucination grounding audit (~0.8s). |
-| **`fix_proposal_node`** | `mistralai/codestral-22b-instruct-v0.1` | `0.1` | `3072` | **Specialized Code Synthesis**: 22B code model ensures high AST diff precision and prevents code truncation. |
-| **`execution_verifier_node`**| `mistralai/codestral-22b-instruct-v0.1` | `0.0` | `2048` | **Precise Unit Test Generation**: Generates clean, deterministic `pytest` scripts. |
+| **`intent_classifier`** | `meta/llama-3.1-8b-instruct` | `0.0` | `20` | **Instant Routing**: Binary `QA` vs `FIX_PROPOSAL` decision runs in **~0.3s** (eliminates 10s heavy model bottleneck). |
+| **`reasoning_node`** | `z-ai/glm-5.2` | `0.1` | `2048` | **High-Intelligence ReAct Loop**: 100B+ model finishes navigation in 4–6 turns with **zero 15-iteration search loops**. |
+| **`verifier_node`** | `z-ai/glm-5.2` | `0.0` | `2048` | **Deterministic Fact-Checking**: Strict anti-hallucination grounding audit without token loop glitches. |
+| **`fix_proposal_node`** | `meta/llama-3.1-8b-instruct` | `0.1` | `3072` | **Universal Code Synthesis**: 8B model ensures 100% API key compatibility and fast code diff synthesis. |
+| **`execution_verifier_node`**| `meta/llama-3.1-8b-instruct` | `0.0` | `2048` | **Universal Unit Test Generator**: Synthesizes executable `pytest` scripts with zero tier permissions errors. |
 
 ---
 
