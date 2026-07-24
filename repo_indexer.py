@@ -317,6 +317,78 @@ def hybrid_search(
 
 
 # --- Dual-Mode LangGraph State Machine ---
+import os
+import sys
+import uuid
+import time
+import ast
+import tempfile
+import subprocess
+import shutil
+import chromadb
+import tree_sitter
+import tree_sitter_python
+from openai import OpenAI
+from rank_bm25 import BM25Okapi
+from typing import TypedDict, List, Tuple, Optional, Dict, Any
+from langgraph.graph import StateGraph, END
+
+# Define ANSI color constants for terminal UI formatting
+COLOR_RESET = "\033[0m"
+COLOR_GREEN_BOLD = "\033[1;92m"
+COLOR_GREEN = "\033[92m"
+COLOR_CYAN_BOLD = "\033[1;96m"
+COLOR_CYAN = "\033[96m"
+COLOR_YELLOW_BOLD = "\033[1;93m"
+COLOR_MAGENTA_BOLD = "\033[1;95m"
+
+# --- Agent State Definition ---
+class AgentState(TypedDict):
+    question: str
+    intent_category: Optional[str]
+    history: List[Tuple[str, str, str]]
+    current_thought: str
+    action_query: Optional[str]
+    final_answer: Optional[str]
+    proposed_fix: Optional[Dict[str, Any]]
+    sandbox_test_script: Optional[str]
+    test_results: Optional[Dict[str, Any]]
+    iterations: int
+    verification_attempts: int
+    verifier_feedback: Optional[str]
+    is_grounded: bool
+    node_latencies: Dict[str, List[float]]
+
+
+def print_latency_benchmark_report(state: AgentState, models_info: Optional[Dict[str, str]] = None):
+    """
+    Computes and displays a formatted latency benchmark table summarizing execution times per node.
+    """
+    latencies = state.get("node_latencies", {})
+    total_pipeline_time = sum(sum(durations) for durations in latencies.values())
+    
+    print("\n" + "=" * 90)
+    print(f"{COLOR_MAGENTA_BOLD}                 DUAL-MODE AGENT LATENCY & PERFORMANCE BENCHMARK REPORT{COLOR_RESET}")
+    print("=" * 90)
+    print(f"{'Node Name':<20} | {'Model ID':<30} | {'Calls':<6} | {'Total (s)':<10} | {'Avg (s)':<9} | {'% Total':<7}")
+    print("-" * 90)
+    
+    for node_name, durations in latencies.items():
+        if not durations:
+            continue
+        call_count = len(durations)
+        total_time = sum(durations)
+        avg_time = total_time / call_count if call_count > 0 else 0.0
+        pct = (total_time / total_pipeline_time * 100) if total_pipeline_time > 0 else 0.0
+        model_name = models_info.get(node_name, "N/A") if models_info else "N/A"
+        print(f"{node_name:<20} | {model_name:<30} | {call_count:<6} | {total_time:<10.3f} | {avg_time:<9.3f} | {pct:<6.1f}%")
+        
+    print("-" * 90)
+    print(f"{COLOR_CYAN_BOLD}Total Agent Execution Latency: {total_pipeline_time:.3f} seconds{COLOR_RESET}")
+    print("=" * 90 + "\n")
+
+
+# --- Dual-Mode LangGraph State Machine ---
 def build_agent_graph(
     collection_name: str,
     persist_dir: str,
@@ -351,11 +423,11 @@ def build_agent_graph(
         question = state["question"]
         
         system_prompt = (
-            "You are an Intent Classifier for a Codebase RAG system.\n"
+            "You are a specialized Intent Classifier for an enterprise Codebase RAG system.\n"
             "Analyze the user request and classify it into EXACTLY one category:\n\n"
-            "1. QA: The user is asking an informational, architectural, or explanatory question about the codebase.\n"
-            "2. FIX_PROPOSAL: The user is reporting a bug, asking to fix an issue, patch a file, or modify functionality.\n\n"
-            "Respond ONLY with one word: QA or FIX_PROPOSAL."
+            "1. QA: The user is asking an informational, architectural, or explanatory question about how the codebase operates.\n"
+            "2. FIX_PROPOSAL: The user is reporting a bug, asking to fix an issue, patch code, or resolve an exception.\n\n"
+            "Respond ONLY with a single word: QA or FIX_PROPOSAL."
         )
         
         client = OpenAI(
@@ -392,24 +464,29 @@ def build_agent_graph(
         iterations = state.get("iterations", 0) + 1
         history_list = state.get("history", [])
         verifier_feedback = state.get("verifier_feedback", None)
+        intent = state.get("intent_category", "QA")
         
         history_str = ""
         for i, (thought, action, obs) in enumerate(history_list):
             history_str += f"\nTurn {i+1}:\nThought: {thought}\nAction: search(\"{action}\")\nObservation:\n{obs}\n"
             
         system_prompt = (
-            "You are a Senior Software Engineer inspecting a codebase.\n"
-            "Your objective is to gather necessary code context using search queries.\n\n"
+            "You are a Senior Principal Software Architect navigating a complex codebase.\n"
+            "Your objective is to gather necessary code context using precise search queries.\n\n"
             "To search the codebase, output EXACTLY:\n"
-            "Thought: [your reasoning for what to search]\n"
-            "Action: search(\"[exact search terms, file names, or class/method names]\")\n\n"
+            "Thought: [your reasoning for what specific symbol, file, or class to search]\n"
+            "Action: search(\"[exact search terms or function names]\")\n\n"
             "When you have retrieved sufficient code context, output EXACTLY:\n"
             "Thought: [your conclusion that sufficient context has been gathered]\n"
-            "Final Answer: [summary of findings and retrieved code blocks]\n"
+            "Final Answer: [your response]\n\n"
+            "CRITICAL RESPONSE GUIDELINES FOR FINAL ANSWER:\n"
+            "1. For QA queries: Output a clear, structured, high-level natural language explanation in plain English. "
+            "Explain the architecture, components, and frameworks clearly. DO NOT dump raw function source code bodies.\n"
+            "2. Cite relevant file paths (e.g., scanner/indexer.py) and function names to ground your explanation.\n"
         )
         
         if verifier_feedback and state.get("verification_attempts", 0) > 0:
-            system_prompt += f"\n\nCRITICAL ATTENTION - PREVIOUS REJECTION FEEDBACK:\n{verifier_feedback}\n"
+            system_prompt += f"\n\nCRITICAL ATTENTION - PREVIOUS REJECTION FEEDBACK FROM VERIFIER:\n{verifier_feedback}\n"
             
         user_prompt = f"Question: {state['question']}\n\nSearch History:\n{history_str if history_str else 'No searches conducted yet.'}\n\nDetermine next step."
         
@@ -517,17 +594,19 @@ def build_agent_graph(
             all_observations = "No code chunks were retrieved during search."
             
         verifier_system_prompt = (
-            "You are a strict Grounding Critic for a codebase QA system.\n"
-            "Evaluate every claim made in the proposed Final Answer against the retrieved code observations.\n"
-            "If all claims are supported by code observations, respond with:\n"
+            "You are a strict Grounding Critic and Anti-Hallucination Audit Engine.\n"
+            "Your sole objective is to audit proposed QA answers against raw retrieved code observations.\n\n"
+            "AUDIT RULES:\n"
+            "1. Every component, framework, file reference, and architectural claim in the Proposed Answer MUST be explicitly supported by the retrieved code observations.\n"
+            "2. If all claims are grounded in code, output:\n"
             "VERDICT: SUPPORTED\n\n"
-            "If any claim is ungrounded or fabricated, respond with:\n"
+            "3. If any claim is ungrounded, fabricated, or inaccurate, output:\n"
             "VERDICT: UNSUPPORTED\n"
             "Unsupported Claims:\n"
-            "- [detail the ungrounded claims]\n"
+            "- [Detail each ungrounded claim]\n"
         )
         
-        verifier_user_prompt = f"Question: {state['question']}\n\nRetrieved Observations:\n{all_observations}\n\nProposed Answer:\n{final_answer}"
+        verifier_user_prompt = f"Question: {state['question']}\n\nRetrieved Code Observations:\n{all_observations}\n\nProposed Answer:\n{final_answer}"
         
         client = OpenAI(
             base_url="https://integrate.api.nvidia.com/v1",
@@ -554,11 +633,7 @@ def build_agent_graph(
         is_grounded = "VERDICT: SUPPORT" in verifier_text.upper() and "UNSUPPORT" not in verifier_text.upper()
         
         if is_grounded or attempts >= 3:
-            if final_answer is not None:
-                updated_answer = final_answer
-            else:
-                updated_answer = ""
-                
+            updated_answer = final_answer if final_answer else ""
             if not is_grounded:
                 updated_answer += f"\n\n[WARNING: Partially Grounded]\nVerifier Feedback:\n{verifier_text}"
             return {
@@ -588,26 +663,26 @@ def build_agent_graph(
             all_observations += f"\n--- Step {step_idx + 1} (Query: {action}) ---\n{observation}\n"
             
         system_prompt = (
-            "You are an Expert Code Fix Agent.\n"
-            "Analyze the user's bug report and retrieved code observations to construct a precise code fix proposal.\n\n"
-            "You MUST output your fix in the following structured key-value format:\n"
-            "ROOT_CAUSE: [Detailed diagnosis of why the bug occurs]\n"
-            "FILE_PATH: [Relative path of target file to modify]\n"
+            "You are a Staff Security Engineer and Automated Patch Specialist.\n"
+            "Analyze the bug report and retrieved codebase observations to synthesize a production-grade code fix proposal.\n\n"
+            "You MUST output your fix proposal using EXACTLY the following key-value format:\n\n"
+            "ROOT_CAUSE: [Provide a precise 2-3 sentence technical diagnosis of why the existing code fails]\n\n"
+            "FILE_PATH: [Provide the exact relative file path of the target file to modify]\n\n"
             "ORIGINAL_CODE:\n"
             "```python\n"
-            "[exact original lines to be replaced]\n"
-            "```\n"
+            "[exact original lines to be replaced from the observation]\n"
+            "```\n\n"
             "REPLACEMENT_CODE:\n"
             "```python\n"
-            "[exact replacement code fixing the bug]\n"
-            "```\n"
-            "EXPLANATION: [Brief summary of how the patch resolves the bug]\n"
+            "[exact replacement code fixing the bug cleanly without syntax errors]\n"
+            "```\n\n"
+            "EXPLANATION: [Step-by-step explanation of how the patch resolves the bug safely]\n"
         )
         
         if verifier_feedback:
             system_prompt += f"\n\nCRITICAL PREVIOUS TEST FAILURE FEEDBACK:\n{verifier_feedback}\n"
             
-        user_prompt = f"Bug Report: {question}\n\nRetrieved Code Observations:\n{all_observations}\n\nGenerate structured fix proposal now."
+        user_prompt = f"Bug Report: {question}\n\nRetrieved Code Observations:\n{all_observations}\n\nSynthesize structured fix proposal now."
         
         client = OpenAI(
             base_url="https://integrate.api.nvidia.com/v1",
@@ -724,9 +799,9 @@ def build_agent_graph(
                 }
                 
         test_gen_prompt = (
-            "You are a QA Test Engineer creating a dynamic unit test script.\n"
-            "Given a bug report and a proposed fix, generate a self-contained Python test script (using pytest or standard unittest)\n"
-            "that reproduces the bug and asserts that the fix works correctly.\n\n"
+            "You are a Senior QA Test Engineer creating an automated unit test script.\n"
+            "Given a bug report and a proposed fix, generate a self-contained Python test script (using pytest or unittest)\n"
+            "that reproduces the bug and asserts that the replacement fix operates correctly.\n\n"
             "Output ONLY valid Python code inside a single ```python codeblock.\n"
         )
         
@@ -887,7 +962,6 @@ def build_agent_graph(
     app = workflow.compile()
     app.configured_models = configured_models
     return app
-
 
 # --- Main CLI Execution ---
 if __name__ == "__main__":
