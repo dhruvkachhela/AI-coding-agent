@@ -322,6 +322,7 @@ import sys
 import uuid
 import time
 import ast
+import re
 import tempfile
 import subprocess
 import shutil
@@ -340,6 +341,7 @@ COLOR_GREEN = "\033[92m"
 COLOR_CYAN_BOLD = "\033[1;96m"
 COLOR_CYAN = "\033[96m"
 COLOR_YELLOW_BOLD = "\033[1;93m"
+COLOR_RED_BOLD = "\033[1;91m"
 COLOR_MAGENTA_BOLD = "\033[1;95m"
 
 # --- Agent State Definition ---
@@ -350,6 +352,7 @@ class AgentState(TypedDict):
     current_thought: str
     action_query: Optional[str]
     final_answer: Optional[str]
+    reasoning_diagnosis: Optional[str]
     proposed_fix: Optional[Dict[str, Any]]
     sandbox_test_script: Optional[str]
     test_results: Optional[Dict[str, Any]]
@@ -357,35 +360,72 @@ class AgentState(TypedDict):
     verification_attempts: int
     verifier_feedback: Optional[str]
     is_grounded: bool
-    node_latencies: Dict[str, List[float]]
+    node_latencies: Dict[str, List[Dict[str, float]]]
+
+
+def clean_code_snippet(code_str: str) -> str:
+    """
+    Robustly strips markdown code fences (```python, ```py, ```), surrounding whitespace,
+    and residual backticks from code strings.
+    """
+    if not code_str:
+        return ""
+    text = code_str.strip()
+    lines = text.splitlines()
+    if lines and lines[0].strip().startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip().startswith("```"):
+        lines = lines[:-1]
+    cleaned = "\n".join(lines).strip()
+    cleaned = re.sub(r"^```(?:python|py)?\n?", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\n?```$", "", cleaned)
+    return cleaned.strip()
+
+
+def record_latency(state: AgentState, node_name: str, total_duration: float, api_duration: float = 0.0) -> Dict[str, List[Dict[str, float]]]:
+    """
+    Records total, api, and internal execution latency per node in state.
+    """
+    latencies = dict(state.get("node_latencies", {}))
+    if node_name not in latencies:
+        latencies[node_name] = []
+    internal_duration = max(0.0, total_duration - api_duration)
+    latencies[node_name] = list(latencies[node_name]) + [{
+        "total": total_duration,
+        "api": api_duration,
+        "internal": internal_duration
+    }]
+    return latencies
 
 
 def print_latency_benchmark_report(state: AgentState, models_info: Optional[Dict[str, str]] = None):
     """
-    Computes and displays a formatted latency benchmark table summarizing execution times per node.
+    Displays benchmark report breaking out API-wait time vs internal logic processing time per node.
     """
     latencies = state.get("node_latencies", {})
-    total_pipeline_time = sum(sum(durations) for durations in latencies.values())
+    total_pipeline_time = sum(sum(item["total"] for item in durations) for durations in latencies.values())
     
-    print("\n" + "=" * 90)
+    print("\n" + "=" * 105)
     print(f"{COLOR_MAGENTA_BOLD}                 DUAL-MODE AGENT LATENCY & PERFORMANCE BENCHMARK REPORT{COLOR_RESET}")
-    print("=" * 90)
-    print(f"{'Node Name':<20} | {'Model ID':<30} | {'Calls':<6} | {'Total (s)':<10} | {'Avg (s)':<9} | {'% Total':<7}")
-    print("-" * 90)
+    print("=" * 105)
+    print(f"{'Node Name':<20} | {'Model ID':<28} | {'Calls':<5} | {'Total (s)':<9} | {'API (s)':<9} | {'Internal':<9} | {'Avg (s)':<8} | {'% Total':<7}")
+    print("-" * 105)
     
     for node_name, durations in latencies.items():
         if not durations:
             continue
         call_count = len(durations)
-        total_time = sum(durations)
+        total_time = sum(item["total"] for item in durations)
+        api_time = sum(item["api"] for item in durations)
+        internal_time = sum(item["internal"] for item in durations)
         avg_time = total_time / call_count if call_count > 0 else 0.0
         pct = (total_time / total_pipeline_time * 100) if total_pipeline_time > 0 else 0.0
         model_name = models_info.get(node_name, "N/A") if models_info else "N/A"
-        print(f"{node_name:<20} | {model_name:<30} | {call_count:<6} | {total_time:<10.3f} | {avg_time:<9.3f} | {pct:<6.1f}%")
+        print(f"{node_name:<20} | {model_name:<28} | {call_count:<5} | {total_time:<9.3f} | {api_time:<9.3f} | {internal_time:<9.3f} | {avg_time:<8.3f} | {pct:<6.1f}%")
         
-    print("-" * 90)
+    print("-" * 105)
     print(f"{COLOR_CYAN_BOLD}Total Agent Execution Latency: {total_pipeline_time:.3f} seconds{COLOR_RESET}")
-    print("=" * 90 + "\n")
+    print("=" * 105 + "\n")
 
 
 # --- Dual-Mode LangGraph State Machine ---
@@ -411,13 +451,6 @@ def build_agent_graph(
         "execution_verifier": model_test_generator
     }
 
-    def record_latency(state: AgentState, node_name: str, duration: float) -> Dict[str, List[float]]:
-        latencies = dict(state.get("node_latencies", {}))
-        if node_name not in latencies:
-            latencies[node_name] = []
-        latencies[node_name] = list(latencies[node_name]) + [duration]
-        return latencies
-
     def intent_classifier_node(state: AgentState):
         start_time = time.time()
         question = state["question"]
@@ -435,6 +468,7 @@ def build_agent_graph(
             api_key=nvidia_api_key
         )
         
+        api_start = time.time()
         response = client.chat.completions.create(
             model=model_classifier,
             messages=[
@@ -444,14 +478,16 @@ def build_agent_graph(
             temperature=0.0,
             max_tokens=20
         )
+        api_elapsed = time.time() - api_start
+        total_elapsed = time.time() - start_time
+        internal_elapsed = max(0.0, total_elapsed - api_elapsed)
         
         intent = response.choices[0].message.content.strip().upper()
         category = "FIX_PROPOSAL" if "FIX" in intent else "QA"
         
-        elapsed_time = time.time() - start_time
-        updated_latencies = record_latency(state, "intent_classifier", elapsed_time)
+        updated_latencies = record_latency(state, "intent_classifier", total_elapsed, api_elapsed)
         
-        print(f"\n--- [{COLOR_CYAN_BOLD}INTENT CLASSIFIER{COLOR_RESET}] (Model: {model_classifier} | Time: {elapsed_time:.3f}s) ---")
+        print(f"\n--- [{COLOR_CYAN_BOLD}INTENT CLASSIFIER{COLOR_RESET}] (Model: {model_classifier} | API: {api_elapsed:.3f}s | Internal: {internal_elapsed:.3f}s | Total: {total_elapsed:.3f}s) ---")
         print(f"Query: '{question}' -> Category: {category}")
         
         return {
@@ -464,26 +500,32 @@ def build_agent_graph(
         iterations = state.get("iterations", 0) + 1
         history_list = state.get("history", [])
         verifier_feedback = state.get("verifier_feedback", None)
-        intent = state.get("intent_category", "QA")
         
         history_str = ""
         for i, (thought, action, obs) in enumerate(history_list):
-            history_str += f"\nTurn {i+1}:\nThought: {thought}\nAction: search(\"{action}\")\nObservation:\n{obs}\n"
+            history_str += f"\nTurn {i+1}:\nThought: {thought}\nAction: search('{action}')\nObservation:\n{obs}\n"
             
-        system_prompt = (
-            "You are a Senior Principal Software Architect navigating a complex codebase.\n"
-            "Your objective is to gather necessary code context using precise search queries.\n\n"
-            "To search the codebase, output EXACTLY:\n"
-            "Thought: [your reasoning for what specific symbol, file, or class to search]\n"
-            "Action: search(\"[exact search terms or function names]\")\n\n"
-            "When you have retrieved sufficient code context, output EXACTLY:\n"
-            "Thought: [your conclusion that sufficient context has been gathered]\n"
-            "Final Answer: [your response]\n\n"
-            "CRITICAL RESPONSE GUIDELINES FOR FINAL ANSWER:\n"
-            "1. For QA queries: Output a clear, structured, high-level natural language explanation in plain English. "
-            "Explain the architecture, components, and frameworks clearly. DO NOT dump raw function source code bodies.\n"
-            "2. Cite relevant file paths (e.g., scanner/indexer.py) and function names to ground your explanation.\n"
-        )
+        system_prompt = """You are a Senior Principal Software Architect navigating a complex codebase.
+Your objective is to gather necessary code context using precise search queries.
+
+To search the codebase, output EXACTLY:
+Thought: [your reasoning for what specific symbol, file, or class to search]
+Action: search("[exact search terms or function names]")
+
+When you have retrieved sufficient code context, output EXACTLY:
+Thought: [your conclusion that sufficient context has been gathered]
+Final Answer: [your response]
+
+CRITICAL: You must output EXACTLY ONE Thought and ONE Action (or ONE Final Answer),
+never both, never more than one of each. NEVER write your own "Observation:" lines —
+you do not have search results yet. NEVER simulate multiple search turns in a single
+response. NEVER write "Turn 2:", "Turn 3:", etc. If you write more than one Action or
+any Observation yourself, your entire response will be discarded as invalid.
+
+CRITICAL RESPONSE GUIDELINES FOR FINAL ANSWER:
+1. For QA queries: Output a clear, structured, high-level natural language explanation in plain English. Explain the architecture, components, and frameworks clearly. DO NOT dump raw function source code bodies.
+2. For FIX_PROPOSAL queries: Clearly identify the target file path, method/function name, line number, and root cause of the bug.
+"""
         
         if verifier_feedback and state.get("verification_attempts", 0) > 0:
             system_prompt += f"\n\nCRITICAL ATTENTION - PREVIOUS REJECTION FEEDBACK FROM VERIFIER:\n{verifier_feedback}\n"
@@ -495,6 +537,7 @@ def build_agent_graph(
             api_key=nvidia_api_key
         )
         
+        api_start = time.time()
         response = client.chat.completions.create(
             model=model_reasoning,
             messages=[
@@ -504,13 +547,22 @@ def build_agent_graph(
             temperature=0.1,
             max_tokens=2048
         )
+        api_elapsed = time.time() - api_start
         
         text = response.choices[0].message.content.strip()
-        elapsed_time = time.time() - start_time
-        updated_latencies = record_latency(state, "reasoning", elapsed_time)
         
-        print(f"\n--- [{COLOR_CYAN_BOLD}REASONING AGENT{COLOR_RESET}] Iteration {iterations} (Model: {model_reasoning} | Time: {elapsed_time:.3f}s) ---")
-        print(text)
+        # HALLUCINATION GUARD: if the model wrote its own fake Observation: lines or
+        # more than one Action:, it is simulating a multi-turn transcript instead of
+        # taking one real step. Truncate to only the first real Thought/Action pair.
+        if text.count("Observation:") > 0 or text.count("Action:") > 1:
+            print(f"[{COLOR_YELLOW_BOLD}HALLUCINATION GUARD{COLOR_RESET}] Model generated a fake multi-turn transcript. Truncating to first real step.")
+            first_action_idx = text.find("\nAction:")
+            if first_action_idx == -1 and text.startswith("Action:"):
+                first_action_idx = 0
+            if first_action_idx != -1:
+                search_start = first_action_idx if first_action_idx == 0 else first_action_idx + 1
+                next_line_end = text.find("\n", search_start)
+                text = text[:next_line_end if next_line_end != -1 else len(text)]
         
         current_thought = ""
         action_query = None
@@ -523,18 +575,68 @@ def build_agent_graph(
             elif line.startswith("Action:"):
                 act = line.replace("Action:", "").strip()
                 if "search(" in act and act.endswith(")"):
-                    action_query = act.split("search(")[1][:-1].strip('\"\'')
+                    action_query = act.split("search(")[1][:-1].strip("\"'")
             elif line.startswith("Final Answer:"):
                 final_answer = text.split("Final Answer:")[1].strip()
+        
+        # ACTION PRIORITY: if the model requested a real search this turn, it must not
+        # also claim a Final Answer in the same completion — wait for the real result.
+        if action_query:
+            final_answer = None
                 
+        # LOOP PROTECTION: Detect repeated search query and force ONE REAL LLM SYNTHESIS CALL from full history
+        past_queries = [action for (_, action, _) in history_list if action]
+        if action_query and action_query in past_queries:
+            print(f"[{COLOR_YELLOW_BOLD}LOOP PROTECTION{COLOR_RESET}] Repeated query '{action_query}' detected. Forcing real LLM synthesis from full history.")
+            
+            synth_system_prompt = (
+                "You are a Senior Principal Software Architect.\n"
+                "You have searched enough. Do not search again. Based on ALL prior retrieved observations below, give your Final Answer now.\n\n"
+                "CRITICAL RESPONSE GUIDELINES FOR FINAL ANSWER:\n"
+                "1. For QA queries: Output a clear, structured, high-level natural language explanation in plain English. Explain the architecture clearly. DO NOT dump raw function source code bodies.\n"
+                "2. For FIX_PROPOSAL queries: Clearly identify the exact target file path, method/function name, line numbers, and technical root cause of the bug.\n"
+                "Begin your response with 'Final Answer:' followed by your detailed response."
+            )
+            
+            synth_user_prompt = f"Question: {state['question']}\n\nAll Retrieved Code Observations:\n{history_str}\n\nGive your Final Answer now."
+            
+            api_synth_start = time.time()
+            synth_response = client.chat.completions.create(
+                model=model_reasoning,
+                messages=[
+                    {"role": "system", "content": synth_system_prompt},
+                    {"role": "user", "content": synth_user_prompt}
+                ],
+                temperature=0.1,
+                max_tokens=2048
+            )
+            api_synth_elapsed = time.time() - api_synth_start
+            api_elapsed += api_synth_elapsed
+            
+            synth_text = synth_response.choices[0].message.content.strip()
+            action_query = None
+            if "Final Answer:" in synth_text:
+                final_answer = synth_text.split("Final Answer:")[1].strip()
+            else:
+                final_answer = synth_text
+            text = f"Thought: Loop Protection triggered -> Forced Synthesis Call\nFinal Answer: {final_answer}"
+
         if not action_query and not final_answer:
             current_thought = text
             final_answer = text
+            
+        total_elapsed = time.time() - start_time
+        internal_elapsed = max(0.0, total_elapsed - api_elapsed)
+        updated_latencies = record_latency(state, "reasoning", total_elapsed, api_elapsed)
+        
+        print(f"\n--- [{COLOR_CYAN_BOLD}REASONING AGENT{COLOR_RESET}] Iteration {iterations} (Model: {model_reasoning} | API: {api_elapsed:.3f}s | Internal: {internal_elapsed:.3f}s | Total: {total_elapsed:.3f}s) ---")
+        print(text)
             
         return {
             "current_thought": current_thought,
             "action_query": action_query,
             "final_answer": final_answer,
+            "reasoning_diagnosis": final_answer,
             "iterations": iterations,
             "node_latencies": updated_latencies
         }
@@ -543,6 +645,7 @@ def build_agent_graph(
         start_time = time.time()
         action = state["action_query"]
         
+        api_start = time.time()
         results = hybrid_search(
             query=action,
             collection_name=collection_name,
@@ -555,6 +658,7 @@ def build_agent_graph(
             metadata_weight=3.0,
             body_weight=1.0
         )
+        api_elapsed = time.time() - api_start
         
         observation = ""
         for r in results:
@@ -568,10 +672,11 @@ def build_agent_graph(
         new_history = list(state["history"])
         new_history.append((state["current_thought"], action, observation))
         
-        elapsed_time = time.time() - start_time
-        updated_latencies = record_latency(state, "tool", elapsed_time)
+        total_elapsed = time.time() - start_time
+        internal_elapsed = max(0.0, total_elapsed - api_elapsed)
+        updated_latencies = record_latency(state, "tool", total_elapsed, api_elapsed)
         
-        print(f"\n--- [{COLOR_CYAN}TOOL CALL{COLOR_RESET}] (Time: {elapsed_time:.3f}s) ---")
+        print(f"\n--- [{COLOR_CYAN}TOOL CALL{COLOR_RESET}] (API: {api_elapsed:.3f}s | Internal: {internal_elapsed:.3f}s | Total: {total_elapsed:.3f}s) ---")
         print(f"Query: '{action}' -> Retrieved {len(results)} chunks.")
         
         return {
@@ -613,6 +718,7 @@ def build_agent_graph(
             api_key=nvidia_api_key
         )
         
+        api_start = time.time()
         response = client.chat.completions.create(
             model=model_verifier,
             messages=[
@@ -622,12 +728,14 @@ def build_agent_graph(
             temperature=0.0,
             max_tokens=2048
         )
+        api_elapsed = time.time() - api_start
+        total_elapsed = time.time() - start_time
+        internal_elapsed = max(0.0, total_elapsed - api_elapsed)
         
         verifier_text = response.choices[0].message.content.strip()
-        elapsed_time = time.time() - start_time
-        updated_latencies = record_latency(state, "verifier", elapsed_time)
+        updated_latencies = record_latency(state, "verifier", total_elapsed, api_elapsed)
         
-        print(f"\n--- [{COLOR_YELLOW_BOLD}GROUNDING VERIFIER CRITIC{COLOR_RESET}] Attempt {attempts} (Model: {model_verifier} | Time: {elapsed_time:.3f}s) ---")
+        print(f"\n--- [{COLOR_YELLOW_BOLD}GROUNDING VERIFIER CRITIC{COLOR_RESET}] Attempt {attempts} (Model: {model_verifier} | API: {api_elapsed:.3f}s | Internal: {internal_elapsed:.3f}s | Total: {total_elapsed:.3f}s) ---")
         print(verifier_text)
         
         is_grounded = "VERDICT: SUPPORT" in verifier_text.upper() and "UNSUPPORT" not in verifier_text.upper()
@@ -657,6 +765,7 @@ def build_agent_graph(
         question = state["question"]
         history_list = state.get("history", [])
         verifier_feedback = state.get("verifier_feedback", None)
+        reasoning_diagnosis = state.get("reasoning_diagnosis", "")
         
         all_observations = ""
         for step_idx, (thought, action, observation) in enumerate(history_list):
@@ -667,28 +776,38 @@ def build_agent_graph(
             "Analyze the bug report and retrieved codebase observations to synthesize a production-grade code fix proposal.\n\n"
             "You MUST output your fix proposal using EXACTLY the following key-value format:\n\n"
             "ROOT_CAUSE: [Provide a precise 2-3 sentence technical diagnosis of why the existing code fails]\n\n"
-            "FILE_PATH: [Provide the exact relative file path of the target file to modify]\n\n"
+            "FILE_PATH: [Provide the exact relative file path of the target file to modify, with NO backticks, NO quotes, NO markdown formatting around it — plain text only]\n\n"
             "ORIGINAL_CODE:\n"
             "```python\n"
-            "[exact original lines to be replaced from the observation]\n"
+            "[exact original lines to be replaced from the observation including exact whitespace]\n"
             "```\n\n"
             "REPLACEMENT_CODE:\n"
             "```python\n"
-            "[exact replacement code fixing the bug cleanly without syntax errors]\n"
+            "[exact replacement code fixing the bug cleanly]\n"
             "```\n\n"
-            "EXPLANATION: [Step-by-step explanation of how the patch resolves the bug safely]\n"
+            "EXPLANATION: [Step-by-step explanation of how the patch resolves the bug safely]\n\n"
+            "CRITICAL: Never use '...' or any other elision/truncation to shorten code in "
+            "ORIGINAL_CODE or REPLACEMENT_CODE. Reproduce every single line of the target "
+            "function in FULL, character-for-character, including unchanged lines. Omitting "
+            "ANY line — even with '...' — will cause verification to fail immediately.\n"
         )
         
         if verifier_feedback:
-            system_prompt += f"\n\nCRITICAL PREVIOUS TEST FAILURE FEEDBACK:\n{verifier_feedback}\n"
+            system_prompt += f"\n\nCRITICAL PREVIOUS TEST FAILURE FEEDBACK FROM VERIFIER AGENT:\n{verifier_feedback}\nFix the issues indicated above.\n"
             
-        user_prompt = f"Bug Report: {question}\n\nRetrieved Code Observations:\n{all_observations}\n\nSynthesize structured fix proposal now."
+        user_prompt = (
+            f"Bug Report: {question}\n\n"
+            f"Reasoning Agent's Diagnosis (primary root-cause source — use this as your main basis for FILE_PATH, ROOT_CAUSE, and what code needs to change; the raw observations below are supporting evidence only):\n{reasoning_diagnosis}\n\n"
+            f"Retrieved Code Observations:\n{all_observations}\n\n"
+            f"Synthesize structured fix proposal now."
+        )
         
         client = OpenAI(
             base_url="https://integrate.api.nvidia.com/v1",
             api_key=nvidia_api_key
         )
         
+        api_start = time.time()
         response = client.chat.completions.create(
             model=model_fix_proposal,
             messages=[
@@ -698,32 +817,30 @@ def build_agent_graph(
             temperature=0.1,
             max_tokens=3072
         )
+        api_elapsed = time.time() - api_start
+        total_elapsed = time.time() - start_time
+        internal_elapsed = max(0.0, total_elapsed - api_elapsed)
         
         text = response.choices[0].message.content.strip()
-        elapsed_time = time.time() - start_time
-        updated_latencies = record_latency(state, "fix_proposal", elapsed_time)
+        updated_latencies = record_latency(state, "fix_proposal", total_elapsed, api_elapsed)
         
-        print(f"\n--- [{COLOR_CYAN_BOLD}FIX PROPOSAL AGENT{COLOR_RESET}] (Model: {model_fix_proposal} | Time: {elapsed_time:.3f}s) ---")
+        print(f"\n--- [{COLOR_CYAN_BOLD}FIX PROPOSAL AGENT{COLOR_RESET}] (Model: {model_fix_proposal} | API: {api_elapsed:.3f}s | Internal: {internal_elapsed:.3f}s | Total: {total_elapsed:.3f}s) ---")
         print(text)
         
         file_path = "target_file.py"
         root_cause = "Bug detected in target method"
-        original_code = ""
-        replacement_code = ""
+        raw_original_code = ""
+        raw_replacement_code = ""
         explanation = ""
         
         if "FILE_PATH:" in text:
             file_path = text.split("FILE_PATH:")[1].split("\n")[0].strip()
+            file_path = file_path.strip("`'\" ")
         if "ROOT_CAUSE:" in text:
             root_cause = text.split("ROOT_CAUSE:")[1].split("FILE_PATH:")[0].strip() if "FILE_PATH:" in text else text.split("ROOT_CAUSE:")[1].split("\n")[0].strip()
         if "ORIGINAL_CODE:" in text and "REPLACEMENT_CODE:" in text:
             orig_part = text.split("ORIGINAL_CODE:")[1].split("REPLACEMENT_CODE:")[0]
-            if "```python" in orig_part:
-                original_code = orig_part.split("```python")[1].split("```")[0].strip()
-            elif "```" in orig_part:
-                original_code = orig_part.split("```")[1].split("```")[0].strip()
-            else:
-                original_code = orig_part.strip()
+            raw_original_code = orig_part.strip()
                 
             repl_part = text.split("REPLACEMENT_CODE:")[1]
             if "EXPLANATION:" in repl_part:
@@ -731,25 +848,43 @@ def build_agent_graph(
                 explanation = repl_part.split("EXPLANATION:")[1].strip()
             else:
                 repl_code_part = repl_part
-                
-            if "```python" in repl_code_part:
-                replacement_code = repl_code_part.split("```python")[1].split("```")[0].strip()
-            elif "```" in repl_code_part:
-                replacement_code = repl_code_part.split("```")[1].split("```")[0].strip()
-            else:
-                replacement_code = repl_code_part.strip()
-                
+            raw_replacement_code = repl_code_part.strip()
+            
+        cleaned_original_code = clean_code_snippet(raw_original_code)
+        cleaned_replacement_code = clean_code_snippet(raw_replacement_code)
+        
+        import re as _re_check
+        truncation_pattern = _re_check.compile(r'^\s*\.\.\.\s*$', _re_check.MULTILINE)
+        if truncation_pattern.search(cleaned_original_code) or truncation_pattern.search(cleaned_replacement_code):
+            elapsed_time = time.time() - start_time
+            updated_latencies = record_latency(state, "fix_proposal", elapsed_time, 0.0)
+            return {
+                "proposed_fix": {
+                    "file_path": file_path,
+                    "root_cause": root_cause,
+                    "original_code": cleaned_original_code,
+                    "replacement_code": cleaned_replacement_code,
+                    "explanation": explanation,
+                    "raw_text": text
+                },
+                "verifier_feedback": "Your ORIGINAL_CODE or REPLACEMENT_CODE contained '...' truncation. You must reproduce the ENTIRE function with zero elisions, every line, character-for-character.",
+                "verification_attempts": state.get("verification_attempts", 0) + 1,
+                "final_answer": None,
+                "node_latencies": updated_latencies
+            }
+        
         proposed_fix = {
             "file_path": file_path,
             "root_cause": root_cause,
-            "original_code": original_code,
-            "replacement_code": replacement_code,
+            "original_code": cleaned_original_code,
+            "replacement_code": cleaned_replacement_code,
             "explanation": explanation,
             "raw_text": text
         }
         
         return {
             "proposed_fix": proposed_fix,
+            "final_answer": None,
             "node_latencies": updated_latencies
         }
 
@@ -757,47 +892,117 @@ def build_agent_graph(
         start_time = time.time()
         proposed_fix = state.get("proposed_fix", {})
         attempts = state.get("verification_attempts", 0) + 1
-        replacement_code = proposed_fix.get("replacement_code", "")
-        original_code = proposed_fix.get("original_code", "")
-        file_path = proposed_fix.get("file_path", "module.py")
+        replacement_code = clean_code_snippet(proposed_fix.get("replacement_code", ""))
+        original_code = clean_code_snippet(proposed_fix.get("original_code", ""))
+        rel_file_path = proposed_fix.get("file_path", "module.py").strip()
         
         print(f"\n--- [{COLOR_YELLOW_BOLD}EXECUTION VERIFIER AGENT{COLOR_RESET}] Attempt {attempts} (Model: {model_test_generator}) ---")
         
+        # 1. Resolve actual target file path on local filesystem
+        target_full_path = rel_file_path
+        if not os.path.exists(target_full_path):
+            target_file_name = os.path.basename(rel_file_path.replace("\\", "/"))
+            best_candidate = None
+            for r_dir, _, files in os.walk("."):
+                if target_file_name in files:
+                    candidate = os.path.join(r_dir, target_file_name)
+                    if candidate.replace("\\", "/").endswith(rel_file_path.replace("\\", "/")):
+                        # Exact relative-path suffix match — use immediately, this is correct
+                        best_candidate = candidate
+                        break
+                    elif best_candidate is None:
+                        # Only take a basename-only match as a last-resort fallback,
+                        # and only the FIRST one found, never overwrite it later
+                        best_candidate = candidate
+            if best_candidate:
+                target_full_path = best_candidate
+                        
+        full_source_content = ""
+        file_found = os.path.exists(target_full_path)
+        if file_found:
+            try:
+                with open(target_full_path, "r", encoding="utf-8", errors="replace") as f:
+                    full_source_content = f.read()
+            except Exception as e:
+                file_found = False
+                
+        # 2. Check if original_code exists verbatim in full_source_content
+        match_found = False
+        patched_file_content = ""
+        original_error_msg = ""
+        
+        if file_found and full_source_content:
+            if original_code and original_code in full_source_content:
+                match_found = True
+                patched_file_content = full_source_content.replace(original_code, replacement_code, 1)
+            else:
+                norm_full = "\n".join([line.rstrip() for line in full_source_content.splitlines()])
+                norm_orig = "\n".join([line.rstrip() for line in original_code.splitlines()])
+                if norm_orig and norm_orig in norm_full:
+                    match_found = True
+                    patched_file_content = norm_full.replace(norm_orig, replacement_code, 1)
+                else:
+                    original_error_msg = f"original_code not found verbatim in {rel_file_path} — please re-extract exact original lines including whitespace"
+                    print(f"✗ Substring Match Failed -> {original_error_msg}")
+        else:
+            original_error_msg = f"Target file '{rel_file_path}' could not be read on filesystem"
+            print(f"✗ File Load Failed -> {original_error_msg}")
+            
+        # 3. Perform AST Validation on FULL patched file content
         syntax_valid = False
         syntax_error_msg = ""
-        try:
-            ast.parse(replacement_code)
-            syntax_valid = True
-            print("✓ AST Syntax Check: Passed (Valid Python Syntax)")
-        except SyntaxError as se:
-            syntax_error_msg = f"SyntaxError in replacement code: {se}"
-            print(f"✗ AST Syntax Check: Failed -> {syntax_error_msg}")
-            
+        
+        if match_found and patched_file_content:
+            try:
+                ast.parse(patched_file_content)
+                syntax_valid = True
+                print("✓ Full File AST Syntax Check: Passed (Valid Python File Syntax)")
+            except SyntaxError as se:
+                syntax_error_msg = f"SyntaxError in patched target file: {se}"
+                print(f"✗ Full File AST Syntax Check: Failed -> {syntax_error_msg}")
+        elif not match_found and original_error_msg:
+            syntax_error_msg = original_error_msg
+            syntax_valid = False
+        else:
+            try:
+                ast.parse(replacement_code)
+                syntax_valid = True
+                print("✓ Standalone AST Syntax Check: Passed")
+            except SyntaxError as se:
+                syntax_error_msg = f"SyntaxError in replacement code: {se}"
+                print(f"✗ Standalone AST Syntax Check: Failed -> {syntax_error_msg}")
+                
         if not syntax_valid:
             elapsed_time = time.time() - start_time
-            updated_latencies = record_latency(state, "execution_verifier", elapsed_time)
+            updated_latencies = record_latency(state, "execution_verifier", elapsed_time, 0.0)
+            
             if attempts >= 3:
-                final_report = (
-                    f"### Category 2 Bug Fix Proposal (AST Error)\n\n"
-                    f"**Target File**: `{file_path}`\n\n"
-                    f"**Root Cause**: {proposed_fix.get('root_cause', '')}\n\n"
-                    f"**Proposed Replacement Code**:\n```python\n{replacement_code}\n```\n\n"
-                    f"[WARNING: Syntax Validation Failed: {syntax_error_msg}]"
+                failed_report = (
+                    f"[FIX FAILED VERIFICATION]\n\n"
+                    f"**Target File**: `{rel_file_path}`\n\n"
+                    f"**Root Cause Diagnosis**:\n{proposed_fix.get('root_cause', 'N/A')}\n\n"
+                    f"**Last Attempted Replacement Code**:\n```python\n{replacement_code}\n```\n\n"
+                    f"**Verification Failure Detail**:\n"
+                    f"- **AST Syntax Status**: FAILED ({syntax_error_msg})\n"
+                    f"- **Sandbox Unit Test Status**: NOT RUN (Blocked by AST Syntax Error)\n"
+                    f"```text\n{syntax_error_msg}\n```"
                 )
                 return {
                     "verification_attempts": attempts,
                     "test_results": {"passed": False, "output": syntax_error_msg},
-                    "final_answer": final_report,
+                    "final_answer": failed_report,
                     "node_latencies": updated_latencies
                 }
             else:
                 return {
                     "verification_attempts": attempts,
-                    "verifier_feedback": f"Syntax Error in replacement code: {syntax_error_msg}. Correct syntax in replacement_code.",
+                    "verifier_feedback": f"Verification Failure: {syntax_error_msg}. Adjust fix proposal accordingly.",
                     "test_results": {"passed": False, "output": syntax_error_msg},
+                    "final_answer": None,
                     "node_latencies": updated_latencies
                 }
                 
+        # 4. Generate Dynamic Pytest Script & Execute Sandbox Test on Patched Target File
         test_gen_prompt = (
             "You are a Senior QA Test Engineer creating an automated unit test script.\n"
             "Given a bug report and a proposed fix, generate a self-contained Python test script (using pytest or unittest)\n"
@@ -807,7 +1012,11 @@ def build_agent_graph(
         
         user_test_prompt = (
             f"Bug Report: {state['question']}\n"
-            f"Target File: {file_path}\n"
+            f"Target File: {rel_file_path}\n"
+            f"The target file's real module path for imports is: {rel_file_path} "
+            f"(import it using the correct relative/absolute Python import path matching "
+            f"this file's location in the package, e.g. 'from vibesec_pipeline.scanner.layer4_dataflow import ...' "
+            f"— adapt to the actual package structure)\n"
             f"Proposed Replacement Code:\n{replacement_code}\n"
             "Generate unit test script now."
         )
@@ -817,6 +1026,7 @@ def build_agent_graph(
             api_key=nvidia_api_key
         )
         
+        api_start = time.time()
         test_response = client.chat.completions.create(
             model=model_test_generator,
             messages=[
@@ -826,14 +1036,10 @@ def build_agent_graph(
             temperature=0.0,
             max_tokens=2048
         )
+        api_elapsed = time.time() - api_start
         
         test_script_text = test_response.choices[0].message.content.strip()
-        if "```python" in test_script_text:
-            test_code = test_script_text.split("```python")[1].split("```")[0].strip()
-        elif "```" in test_script_text:
-            test_code = test_script_text.split("```")[1].split("```")[0].strip()
-        else:
-            test_code = test_script_text.strip()
+        test_code = clean_code_snippet(test_script_text)
             
         print("✓ Dynamic Test Case Generator: Script Generated.")
         
@@ -842,15 +1048,37 @@ def build_agent_graph(
         exec_output = ""
         
         try:
-            test_file_path = os.path.join(temp_dir, "test_bug_fix.py")
+            # Copy the ENTIRE repo root into the sandbox so relative imports resolve.
+            # Exclude heavy/irrelevant directories that would slow this down or aren't needed.
+            sandbox_repo_root = os.path.join(temp_dir, "repo")
+            shutil.copytree(
+                ".",
+                sandbox_repo_root,
+                ignore=shutil.ignore_patterns(
+                    ".git", "__pycache__", "*.pyc", "venv", ".venv",
+                    "node_modules", "agent_sandbox_*"
+                ),
+                dirs_exist_ok=True
+            )
+            
+            # Overwrite the target file inside the copied repo with the patched content
+            sandbox_target_path = os.path.join(sandbox_repo_root, target_full_path)
+            os.makedirs(os.path.dirname(sandbox_target_path), exist_ok=True)
+            with open(sandbox_target_path, "w", encoding="utf-8") as stf:
+                stf.write(patched_file_content if patched_file_content else replacement_code)
+                
+            # Place the generated test file at the sandbox repo root so pytest can
+            # import the target module using its real package path
+            test_file_path = os.path.join(sandbox_repo_root, "test_bug_fix.py")
             with open(test_file_path, "w", encoding="utf-8") as tf:
                 tf.write(test_code)
                 
             res = subprocess.run(
-                [sys.executable, "-m", "pytest", test_file_path],
+                [sys.executable, "-m", "pytest", "test_bug_fix.py"],
                 capture_output=True,
                 text=True,
-                timeout=15
+                timeout=30,
+                cwd=sandbox_repo_root
             )
             
             exec_output = res.stdout + "\n" + res.stderr
@@ -865,37 +1093,59 @@ def build_agent_graph(
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
             
-        elapsed_time = time.time() - start_time
-        updated_latencies = record_latency(state, "execution_verifier", elapsed_time)
+        total_elapsed = time.time() - start_time
+        internal_elapsed = max(0.0, total_elapsed - api_elapsed)
+        updated_latencies = record_latency(state, "execution_verifier", total_elapsed, api_elapsed)
         
-        final_patch_report = (
-            f"### Category 2 Bug Fix Proposal (Verified)\n\n"
-            f"**Target File**: `{file_path}`\n\n"
-            f"**Root Cause Diagnosis**:\n{proposed_fix.get('root_cause', 'N/A')}\n\n"
-            f"**Original Code**:\n```python\n{original_code}\n```\n\n"
-            f"**Proposed Replacement Code**:\n```python\n{replacement_code}\n```\n\n"
-            f"**Explanation**:\n{proposed_fix.get('explanation', 'Bug fix applied cleanly.')}\n\n"
-            f"--- \n### Dynamic Execution Verification\n"
-            f"- **AST Syntax Status**: Passed\n"
-            f"- **Sandbox Unit Test Status**: {'PASSED (Confirmed Bug Resolved)' if test_passed else 'FAILED'}\n"
-            f"```text\n{exec_output[:500] if exec_output else 'Executed successfully.'}\n```"
-        )
+        print(f"--- [{COLOR_YELLOW_BOLD}EXECUTION VERIFIER COMPLETED{COLOR_RESET}] (API: {api_elapsed:.3f}s | Internal: {internal_elapsed:.3f}s | Total: {total_elapsed:.3f}s) ---")
         
-        if test_passed or attempts >= 3:
+        if test_passed:
+            final_patch_report = (
+                f"### Category 2 Bug Fix Proposal (Verified)\n\n"
+                f"**Target File**: `{rel_file_path}`\n\n"
+                f"**Root Cause Diagnosis**:\n{proposed_fix.get('root_cause', 'N/A')}\n\n"
+                f"**Original Code**:\n```python\n{original_code}\n```\n\n"
+                f"**Proposed Replacement Code**:\n```python\n{replacement_code}\n```\n\n"
+                f"**Explanation**:\n{proposed_fix.get('explanation', 'Bug fix applied cleanly.')}\n\n"
+                f"--- \n### Dynamic Execution Verification\n"
+                f"- **Full File AST Syntax Status**: Passed\n"
+                f"- **Sandbox Unit Test Status**: PASSED (Confirmed Bug Resolved)\n"
+                f"```text\n{exec_output[:500] if exec_output else 'Executed successfully.'}\n```"
+            )
             return {
                 "verification_attempts": attempts,
                 "sandbox_test_script": test_code,
-                "test_results": {"passed": test_passed, "output": exec_output},
+                "test_results": {"passed": True, "output": exec_output},
                 "final_answer": final_patch_report,
                 "node_latencies": updated_latencies
             }
         else:
-            return {
-                "verification_attempts": attempts,
-                "verifier_feedback": f"Sandbox Test Execution Failed:\n{exec_output[:400]}\nAdjust the replacement_code to fix this failure.",
-                "test_results": {"passed": False, "output": exec_output},
-                "node_latencies": updated_latencies
-            }
+            if attempts >= 3:
+                failed_report = (
+                    f"[FIX FAILED VERIFICATION]\n\n"
+                    f"**Target File**: `{rel_file_path}`\n\n"
+                    f"**Root Cause Diagnosis**:\n{proposed_fix.get('root_cause', 'N/A')}\n\n"
+                    f"**Last Attempted Replacement Code**:\n```python\n{replacement_code}\n```\n\n"
+                    f"**Verification Failure Detail**:\n"
+                    f"- **Full File AST Syntax Status**: Passed\n"
+                    f"- **Sandbox Unit Test Status**: FAILED\n"
+                    f"```text\n{exec_output[:500] if exec_output else 'Test execution failed.'}\n```"
+                )
+                return {
+                    "verification_attempts": attempts,
+                    "sandbox_test_script": test_code,
+                    "test_results": {"passed": False, "output": exec_output},
+                    "final_answer": failed_report,
+                    "node_latencies": updated_latencies
+                }
+            else:
+                return {
+                    "verification_attempts": attempts,
+                    "verifier_feedback": f"Sandbox Test Execution Failed:\n{exec_output[:400]}\nAdjust the replacement_code to resolve the test failure.",
+                    "test_results": {"passed": False, "output": exec_output},
+                    "final_answer": None,
+                    "node_latencies": updated_latencies
+                }
 
     # Graph Routers
     def route_reasoning(state: AgentState):
@@ -1044,7 +1294,10 @@ if __name__ == "__main__":
         final_state = agent_app.invoke(initial_state)
         
         print("\n" + "-" * 90)
-        print(f"{COLOR_GREEN_BOLD}FINAL VERIFIED AGENT OUTPUT:{COLOR_RESET}")
+        if "[WARNING: Partially Grounded]" in (final_state.get("final_answer") or ""):
+            print(f"{COLOR_YELLOW_BOLD}FINAL AGENT OUTPUT (GROUNDING CHECK FAILED — SEE WARNING BELOW):{COLOR_RESET}")
+        else:
+            print(f"{COLOR_GREEN_BOLD}FINAL VERIFIED AGENT OUTPUT:{COLOR_RESET}")
         print(f"{COLOR_GREEN}{final_state.get('final_answer')}{COLOR_RESET}")
         print("-" * 90)
         
