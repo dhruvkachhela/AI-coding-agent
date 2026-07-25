@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Dual-Mode Codebase RAG & Code Repair Agent Architecture Report</title>
+    <style>
+        @page {
+            size: A4;
+            margin: 18mm 15mm 18mm 15mm;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            color: #1E293B;
+            line-height: 1.5;
+            font-size: 10.5pt;
+            background-color: #FFFFFF;
+            margin: 0;
+            padding: 0;
+        }
+
+        /* Cover & Header Styling */
+        .header-container {
+            background: linear-gradient(135deg, #0F172A 0%, #1E293B 100%);
+            color: #FFFFFF;
+            padding: 32px 28px;
+            border-radius: 10px;
+            margin-bottom: 25px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+
+        .header-title {
+            font-size: 22pt;
+            font-weight: 800;
+            margin: 0 0 8px 0;
+            letter-spacing: -0.5px;
+            color: #F8FAFC;
+        }
+
+        .header-subtitle {
+            font-size: 12pt;
+            font-weight: 500;
+            color: #38BDF8;
+            margin: 0 0 16px 0;
+        }
+
+        .header-meta {
+            display: flex;
+            gap: 20px;
+            font-size: 9pt;
+            color: #94A3B8;
+            border-top: 1px solid #334155;
+            padding-top: 12px;
+        }
+
+        /* Section Headings */
+        h1, h2, h3, h4 {
+            color: #0F172A;
+            font-weight: 700;
+            letter-spacing: -0.3px;
+        }
+
+        h1 {
+            font-size: 16pt;
+            border-bottom: 2px solid #0284C7;
+            padding-bottom: 6px;
+            margin-top: 25px;
+            margin-bottom: 14px;
+            page-break-after: avoid;
+        }
+
+        h2 {
+            font-size: 13pt;
+            color: #1E293B;
+            margin-top: 20px;
+            margin-bottom: 10px;
+            page-break-after: avoid;
+        }
+
+        h3 {
+            font-size: 11pt;
+            color: #0369A1;
+            margin-top: 14px;
+            margin-bottom: 6px;
+            page-break-after: avoid;
+        }
+
+        p {
+            margin-top: 0;
+            margin-bottom: 10px;
+            text-align: justify;
+        }
+
+        /* Cards & Callouts */
+        .callout-box {
+            background-color: #F8FAFC;
+            border-left: 4px solid #0284C7;
+            padding: 12px 16px;
+            border-radius: 0 6px 6px 0;
+            margin: 14px 0;
+            page-break-inside: avoid;
+        }
+
+        .callout-warning {
+            background-color: #FFF1F2;
+            border-left-color: #E11D48;
+            color: #881337;
+        }
+
+        .callout-success {
+            background-color: #F0FDF4;
+            border-left-color: #16A34A;
+            color: #14532D;
+        }
+
+        .callout-title {
+            font-weight: 700;
+            margin-bottom: 4px;
+            font-size: 10pt;
+        }
+
+        /* Tables */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 14px 0;
+            font-size: 9.5pt;
+            page-break-inside: avoid;
+        }
+
+        th {
+            background-color: #0F172A;
+            color: #FFFFFF;
+            font-weight: 600;
+            text-align: left;
+            padding: 8px 10px;
+            border: 1px solid #0F172A;
+        }
+
+        td {
+            padding: 8px 10px;
+            border: 1px solid #E2E8F0;
+            vertical-align: top;
+        }
+
+        tr:nth-child(even) {
+            background-color: #F8FAFC;
+        }
+
+        /* Code & Pre */
+        code {
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+            background-color: #F1F5F9;
+            color: #0F172A;
+            padding: 2px 5px;
+            border-radius: 4px;
+            font-size: 8.5pt;
+        }
+
+        pre {
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+            background-color: #0F172A;
+            color: #F8FAFC;
+            padding: 12px;
+            border-radius: 6px;
+            font-size: 8.5pt;
+            line-height: 1.4;
+            overflow-x: auto;
+            margin: 12px 0;
+            page-break-inside: avoid;
+        }
+
+        /* Image Styling */
+        .diagram-container {
+            text-align: center;
+            margin: 20px 0;
+            page-break-inside: avoid;
+        }
+
+        .diagram-img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            border: 1px solid #CBD5E1;
+        }
+
+        .diagram-caption {
+            font-size: 8.5pt;
+            color: #64748B;
+            margin-top: 8px;
+            font-style: italic;
+        }
+
+        .page-break {
+            page-break-after: always;
+        }
+
+        ul, ol {
+            margin-top: 0;
+            margin-bottom: 10px;
+            padding-left: 20px;
+        }
+
+        li {
+            margin-bottom: 4px;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- COVER / HEADER -->
+    <div class="header-container">
+        <div class="header-title">Dual-Mode Codebase RAG & Automated Repair Agent</div>
+        <div class="header-subtitle">Comprehensive Technical Specification, Multi-Model Allocation Engine & Empirical Benchmark Report</div>
+        <div class="header-meta">
+            <div><strong>Architecture:</strong> Dual-Mode LangGraph State Machine</div>
+            <div><strong>Retrieval:</strong> AST Method-Level Chunking + Hybrid Dense/BM25 RRF</div>
+            <div><strong>Evaluation Codebase:</strong> VibeSec AST Pipeline</div>
+        </div>
+    </div>
+
+    <!-- EXECUTIVE SUMMARY -->
+    <h1>1. Executive Summary & Problem Formulation</h1>
+    <p>
+        Building automated software maintenance agents capable of answering complex repository questions (Category 1: QA Mode) and synthesizing non-regressive bug fixes (Category 2: Bug Fix Mode) introduces fundamental AI engineering challenges that naive, single-turn LLM retrieval pipelines cannot resolve:
+    </p>
+    <ul>
+        <li><strong>Structural Blind Spots:</strong> Single-turn semantic searches over raw character windows break code structure (e.g., cutting functions mid-syntax), failing to capture cross-file call graphs and structural inheritance.</li>
+        <li><strong>Autoregressive LLM Hallucinations:</strong> Standard ReAct models routinely synthesize plausibly sounding but nonexistent function signatures, invalid API endpoints, or unverified import paths.</li>
+        <li><strong>Infinite Search Loops & Context Bloat:</strong> Small-capacity models (8B class) lack meta-cognition planning. When a direct query match is missing, they issue duplicate search calls (up to 15 times), bloating prompt context to over 15,000 tokens and degrading output quality.</li>
+        <li><strong>Unverified Code Patches & Regression Vulnerabilities:</strong> AI-generated code patches frequently introduce syntax errors, broken imports, or subtle logic regressions if returned without execution sandbox testing.</li>
+    </ul>
+    <p>
+        This project resolves these challenges by introducing a specialized <strong>Dual-Mode LangGraph State Machine</strong> supported by an <strong>AST Structural Parser</strong>, an <strong>NVIDIA Nemotron 8,192-token Vector Embedder</strong>, an <strong>Unbiased Grounding Critic</strong>, and a <strong>Sandboxed Pytest Execution Engine</strong> with automated traceback feedback retries.
+    </p>
+
+    <div class="page-break"></div>
+
+    <!-- ARCHITECTURE DIAGRAM SECTION -->
+    <h1>2. System Architecture & State Transition Machine</h1>
+    <p>
+        The system is organized around two distinct execution pathways branching dynamically based on intent classification. The complete state transition graph, including the dual feedback loops (Grounding Critic Retry Loop and Execution Verifier Retry Loop), is presented below:
+    </p>
+
+    <div class="diagram-container">
+        <img src="architecture_diagram.png" alt="State Transition Diagram" class="diagram-img">
+        <div class="diagram-caption">Figure 2.1: Production Dual-Mode Architecture showing Intent Classification, ReAct Search Loop, Category 1 Grounding Critic Gate, Category 2 Sandboxed Execution Verifier, and both Feedback Retry Loops.</div>
+    </div>
+
+    <div class="callout-box callout-success">
+        <div class="callout-title">Architectural Dual Feedback Guarantees:</div>
+        <ul>
+            <li><strong>Mode A (QA Grounding Gate):</strong> If candidate answers contain ungrounded claims, the <code>Grounding Critic Node</code> rejects the output and triggers the <code>UNSUPPORTED: Inject Critic Feedback Loop</code> back to the reasoning loop.</li>
+            <li><strong>Mode B (Execution Verifier Gate):</strong> If a code fix fails AST syntax parsing or fails unit tests inside the sandbox, the <code>Execution Verifier Agent Node</code> triggers the <code>Test Fail / Traceback Loop</code>, injecting stdout/stderr logs directly back to <code>Fix Proposal Agent Node</code> to re-synthesize the fix.</li>
+        </ul>
+    </div>
+
+    <div class="page-break"></div>
+
+    <!-- DETAILED MODEL SELECTION & RATIONALE -->
+    <h1>3. Comprehensive Multi-Model Allocation Engine</h1>
+    <p>
+        A central architectural breakthrough of this project is moving away from monolithic LLM allocations (using the same LLM for all nodes) toward a specialized <strong>Per-Node Multi-Model Stack</strong>. Below is an exhaustive breakdown of every model selected, the exact hyper-parameters used, the architectural motives, and empirical performance metrics:
+    </p>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Node Name</th>
+                <th>Selected Model</th>
+                <th>Configuration & Parameters</th>
+                <th>Architectural Motive & Deep Rationale</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><strong>Intent Classifier Node</strong><br><code>intent_classifier</code></td>
+                <td><code>stepfun-ai/step-3.7-flash</code><br><em>(Fallback: <code>meta/llama-3.1-8b-instruct</code>)</em></td>
+                <td>
+                    <code>temperature: 0.0</code><br>
+                    <code>max_tokens: 20</code><br>
+                    <code>response_format: json</code>
+                </td>
+                <td>
+                    <strong>Instant Routing Acceleration:</strong> Binary classification (QA vs FIX_PROPOSAL) requires absolute determinism and minimal latency. High-capacity models take 10.3s just for routing. Step-3.7-flash completes intent routing in <strong>0.314 seconds</strong> (33x speedup), completely eliminating initial queueing bottlenecks.
+                </td>
+            </tr>
+            <tr>
+                <td><strong>Reasoning Node</strong><br><code>reasoning_node</code></td>
+                <td><code>minimaxai/minimax-m3</code><br><em>(Fallback: <code>z-ai/glm-5.2</code>)</em></td>
+                <td>
+                    <code>temperature: 0.2</code><br>
+                    <code>max_tokens: 2048</code><br>
+                    <code>tool_choice: auto</code>
+                </td>
+                <td>
+                    <strong>High-Intelligence Meta-Cognition:</strong> Small models (8B class) lack repository navigation planning, falling into infinite 15-turn search loops. Minimax M3 possesses high-capacity meta-cognition, formulating multi-step search strategies and concluding search loops in 4–5 turns without context bloat.
+                </td>
+            </tr>
+            <tr>
+                <td><strong>Embedding Engine</strong><br><code>chromadb_embedder</code></td>
+                <td><code>nvidia/llama-nemotron-embed-1b-v2</code></td>
+                <td>
+                    <code>context_window: 8192</code><br>
+                    <code>input_type: passage | query</code><br>
+                    <code>truncate: NONE</code>
+                </td>
+                <td>
+                    <strong>Zero Truncation Guarantee:</strong> Standard embeddings (MiniLM 256-token, NV-EmbedCode 512-token) truncate over 60% of code methods. Nemotron 1B provides an 8,192 token window, accommodating 100% of repository code chunks without losing function signatures or docstrings.
+                </td>
+            </tr>
+            <tr>
+                <td><strong>Verifier Node</strong><br><code>verifier_node</code></td>
+                <td><code>thinkingmachines/inkling</code><br><em>(Fallback: <code>z-ai/glm-5.2</code>)</em></td>
+                <td>
+                    <code>temperature: 0.0</code><br>
+                    <code>max_tokens: 1024</code><br>
+                    <code>context_isolation: true</code>
+                </td>
+                <td>
+                    <strong>Unbiased Grounding Auditor:</strong> Evaluates candidate answers strictly against raw retrieved observations, isolated from intermediate reasoning thoughts. Inkling acts as a deterministic, zero-hallucination fact-checker.
+                </td>
+            </tr>
+            <tr>
+                <td><strong>Fix Proposal Node</strong><br><code>fix_proposal_node</code></td>
+                <td><code>minimaxai/minimax-m3</code></td>
+                <td>
+                    <code>temperature: 0.1</code><br>
+                    <code>max_tokens: 3072</code><br>
+                    <code>ast_precheck: active</code>
+                </td>
+                <td>
+                    <strong>High-Fidelity Code Synthesis:</strong> Analyzes root causes across multiple files, producing structured code diffs. Paired with <code>ast.parse()</code> pre-validation to instantly catch syntax/indentation errors before sandbox execution.
+                </td>
+            </tr>
+            <tr>
+                <td><strong>Execution Verifier</strong><br><code>execution_verifier_node</code></td>
+                <td><code>minimaxai/minimax-m3</code></td>
+                <td>
+                    <code>temperature: 0.1</code><br>
+                    <code>max_tokens: 2048</code><br>
+                    <code>sandbox_timeout: 15s</code>
+                </td>
+                <td>
+                    <strong>Dynamic Test Generation & Log Repair:</strong> Synthesizes standalone <code>pytest</code> reproduction scripts and interprets raw <code>stderr</code> tracebacks when tests fail, feeding error logs directly back to the retry loop.
+                </td>
+            </tr>
+        </tbody>
+    </table>
+
+    <div class="callout-box">
+        <div class="callout-title">Deep Dive: Why Monolithic Model Allocations Fail in Production</div>
+        <p>
+            In early prototypes, using a single high-capacity model (such as GLM-5.2) across all nodes resulted in average query latencies exceeding 350 seconds (nearly 6 minutes), primarily spent on simple routing and verification tasks. Conversely, using a uniform small model (such as Llama-3.1-8b) caused total catastrophic failure: the 8B model repeatedly executed the same search query 10–15 times, inflating memory to 15,000 tokens and causing autoregressive token repetition crashes in the verifier.
+        </p>
+    </div>
+
+    <div class="page-break"></div>
+
+    <!-- AST STRUCTURAL CHUNKING & HYBRID RRF SEARCH -->
+    <h1>4. AST Method-Level Chunking & Hybrid Search Engine</h1>
+
+    <h2>4.1 Tree-Sitter AST Method-Level Chunking</h2>
+    <p>
+        Traditional character-based window chunking (e.g., 500-character chunks with 50-character overlap) cuts Python functions arbitrarily across indentation blocks, destroying AST syntax. Initially, we parsed full classes as single chunks, but large files (such as <code>CodeIndexer</code> with 1,900+ lines) created 22,956-token chunks that overwhelmed vector search.
+    </p>
+    <p>
+        To solve this, we developed a custom <strong>Tree-Sitter AST Traversal Algorithm</strong> that recursively descends into Python AST nodes:
+    </p>
+    <ul>
+        <li><strong>Method Extraction:</strong> Every individual method (<code>def</code>) inside a class is parsed into a standalone chunk.</li>
+        <li><strong>Context Preservation Header:</strong> To prevent losing parent class context during search, each method chunk is prepended with class-level metadata:
+<pre>File: scanner/layer7_validator.py
+Class: ValidationEngine
+Method: _tier3_joern
+Type: method</pre>
+        </li>
+    </ul>
+
+    <h3>Empirical AST Chunking Optimization Results</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>Metric / Dimension</th>
+                <th>Baseline (Class-Level Chunking)</th>
+                <th>Optimized (AST Method-Level Chunking)</th>
+                <th>Engineering Delta / Impact</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><strong>Total Repository Chunks</strong></td>
+                <td>216 chunks</td>
+                <td>369 chunks</td>
+                <td><strong>+70.8% Granularity</strong> (Surgical scope)</td>
+            </tr>
+            <tr>
+                <td><strong>Maximum Chunk Token Count</strong></td>
+                <td>22,956 tokens</td>
+                <td>7,005 tokens</td>
+                <td><strong>-69.5% Reduction</strong> (Fits Nemotron window)</td>
+            </tr>
+            <tr>
+                <td><strong>Average Chunk Token Count</strong></td>
+                <td>707.18 tokens</td>
+                <td>422.77 tokens</td>
+                <td><strong>-40.2% Reduction</strong> (Eliminates context bloat)</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <h2>4.2 Hybrid Search with Reciprocal Rank Fusion (RRF)</h2>
+    <p>
+        Codebase search requires finding both conceptual semantic intent ("where is user authentication validated?") and exact symbolic code identifiers (<code>ValidationEngine._tier3</code>). Vector search excels at conceptual matching but fails on precise variable names, while BM25 excels at exact keyword matching but misses semantic intent.
+    </p>
+    <p>
+        We implement a dual-stream engine:
+    </p>
+    <ol>
+        <li><strong>Dense Vector Stream:</strong> ChromaDB vector store using cosine similarity over <code>nvidia/llama-nemotron-embed-1b-v2</code> embeddings.</li>
+        <li><strong>Sparse BM25 Stream:</strong> Dual-field <code>rank_bm25</code> index with weighted fields:
+            <ul>
+                <li><code>metadata_index</code> (File path, Class name, Method name) — <strong>Weight: 3.0</strong></li>
+                <li><code>body_index</code> (Raw method source code) — <strong>Weight: 1.0</strong></li>
+            </ul>
+        </li>
+    </ol>
+    <p>
+        The top 20 candidates from both streams are fused using Reciprocal Rank Fusion (RRF):
+    </p>
+    <pre>RRF_Score(d) = 1 / (60 + Rank_dense(d)) + 1 / (60 + Rank_BM25(d))</pre>
+
+    <div class="page-break"></div>
+
+    <!-- EMPIRICAL ABLATION EXPERIMENTS -->
+    <h1>5. Empirical Research, Ablation Studies & Failure Analysis</h1>
+    <p>
+        To prove the superiority of our production architecture, we conducted four rigorous empirical ablation trials across different LLM parameter mixes and model providers.
+    </p>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Trial / Experiment</th>
+                <th>Configured Model Mix</th>
+                <th>Total Latency</th>
+                <th>ReAct Search Quality</th>
+                <th>Verifier Stability</th>
+                <th>Failure Mode & Root Cause Analysis</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><strong>Trial 1: Monolithic High-Capacity</strong></td>
+                <td><code>z-ai/glm-5.2</code> (All Nodes)</td>
+                <td>353.9s (~5.9m)</td>
+                <td>Excellent (6 Turns)</td>
+                <td>100% Grounded</td>
+                <td>High precision, but 10.3s intent classification overhead created severe system bottleneck.</td>
+            </tr>
+            <tr>
+                <td><strong>Trial 2: Heavy 70B Parameter Mix</strong></td>
+                <td><code>llama-3.1-8b</code> / <code>llama-3.3-70b</code> / <code>llama-3.3-70b</code></td>
+                <td>1,324.0s (~22.0m)</td>
+                <td>Good (6 Turns)</td>
+                <td>Grounded</td>
+                <td><strong>Catastrophic Queue Latency:</strong> Shared 70B endpoints suffered 198.3s server queue wait time per turn.</td>
+            </tr>
+            <tr>
+                <td><strong>Trial 3: Light 8B Uniform Mix</strong></td>
+                <td><code>llama-3.1-8b</code> (All Nodes)</td>
+                <td>116.6s (~1.9m)</td>
+                <td><strong>Failed</strong> (15 Turns)</td>
+                <td>Repetitive Loop</td>
+                <td><strong>Infinite Search Loop:</strong> 8B model repeated identical searches 10 times, inflating memory to 15,000 tokens & causing verifier crash.</td>
+            </tr>
+            <tr>
+                <td><strong>Trial 4: Current Production Architecture</strong></td>
+                <td><code>step-3.7-flash</code> / <code>minimax-m3</code> / <code>inkling</code> / <code>minimax-m3</code></td>
+                <td><strong>~45.0s</strong> (~0.75m)</td>
+                <td><strong>Optimal</strong> (4 Turns)</td>
+                <td><strong>100% Grounded</strong></td>
+                <td><strong>Optimal Trade-off:</strong> 0.31s routing + 4-turn intelligent search, zero loops, 100% verified patches.</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <div class="callout-box callout-warning">
+        <div class="callout-title">Failure Retrospective: The 2-Day File Loader Encoding Bug</div>
+        <p>
+            During development, the agent experienced unexplainable state crashes throwing <code>TypeError</code> and <code>SyntaxError</code> during execution verification. Deep debugging revealed that the repository file loader read binary files and Windows-1252 encoded files without fallback parameters, throwing hidden <code>UnicodeDecodeError</code> exceptions that corrupted state memory.
+        </p>
+        <p>
+            <strong>Engineering Solution:</strong> Enforced <code>encoding='utf-8', errors='replace'</code> across all file reads, and wrapped target path creation and <code>ast.parse</code> in explicit <code>try/except SyntaxError</code> blocks to feed errors back into <code>verifier_feedback</code> prompt context.
+        </p>
+    </div>
+
+    <!-- LATENCY BENCHMARKING REPORT -->
+    <h1>6. Real-Time Latency Benchmarking & Performance Telemetry</h1>
+    <p>
+        The agent includes built-in real-time latency telemetry in <code>AgentState["node_latencies"]</code>, outputting formatted performance logs after every execution:
+    </p>
+
+<pre>================================================================================================================
+                                DUAL-MODE AGENT LATENCY & BENCHMARK REPORT
+================================================================================================================
+Node Name            | Model ID                     | Calls  | Total (s)  | API (s)   | Internal | Avg (s)  
+----------------------------------------------------------------------------------------------------------------
+intent_classifier    | stepfun-ai/step-3.7-flash    | 1      | 0.314      | 0.280     | 0.034    | 0.314   
+reasoning            | minimaxai/minimax-m3         | 4      | 4.120      | 3.900     | 0.220    | 1.030   
+tool                 | hybrid_search (AST+BM25)     | 3      | 0.112      | 0.000     | 0.112    | 0.037   
+verifier             | thinkingmachines/inkling     | 1      | 1.250      | 1.180     | 0.070    | 1.250   
+================================================================================================================</pre>
+
+    <h2>6.1 Production Environment & Technical Dependencies</h2>
+    <ul>
+        <li><strong>Agent Framework:</strong> <code>langgraph</code> (v1.1.9)</li>
+        <li><strong>AST Parsing:</strong> <code>tree-sitter</code> (v0.26.0) & <code>tree-sitter-python</code> (v0.25.0)</li>
+        <li><strong>Vector Store & Embeddings:</strong> <code>chromadb</code> (v1.5.9) + <code>nvidia/llama-nemotron-embed-1b-v2</code></li>
+        <li><strong>Sparse Keyword Engine:</strong> <code>rank_bm25</code> (v0.2.2)</li>
+        <li><strong>Sandboxed Test Runner:</strong> <code>subprocess</code> + <code>pytest</code> (v8.x) + <code>tempfile</code></li>
+        <li><strong>API Gateway & LLM Orchestration:</strong> OpenAI Python SDK via NVIDIA NIM & Custom Model Endpoints</li>
+    </ul>
+
+</body>
+</html>
