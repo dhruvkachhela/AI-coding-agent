@@ -33,7 +33,7 @@ graph LR
     E -->|Appends Observation| C
     end
     
-    D -->|Yes| F{Category 1 or 2?}
+    D -->|Yes| F{Route based on Intent}
     
     subgraph Category 1: QA
     F -->|Category 1| G[Verifier Node: Grounding Critic]
