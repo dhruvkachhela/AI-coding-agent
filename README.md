@@ -22,7 +22,7 @@ This project resolves these challenges by implementing a **Dual-Mode LangGraph S
 ## 2. System Architecture
 
 ```mermaid
-graph TD
+graph LR
     A[Input User Question] --> B[Intent Classifier Node]
     B --> C
     
@@ -38,7 +38,7 @@ graph TD
     subgraph Category 1: QA
     F -->|Category 1| G[Verifier Node: Grounding Critic]
     G --> H{Grounding Check}
-    H -->|Unsupported| C
+    H -.->|Unsupported: Retry Reasoning| C
     H -->|Supported| I[END: Return Final Answer]
     end
     
@@ -97,8 +97,11 @@ For Category 2 (Bug Fix Proposal) queries:
 2. **AST Syntax Validation (`ast.parse`)**: Validates replacement code syntax prior to execution.
    * **Motive for AST Check**: Indentation errors can crash the whole process. By running `ast.parse` internally, the agent automatically retries generating a patch if syntax is invalid.
 3. **Dynamic Unit Test Generation**: LLM dynamically writes a standalone `pytest`/`unittest` reproduction script.
+   * **Dynamic Module Loading**: To support target files with non-standard names (e.g., paths containing hyphens), the system enforces dynamic module loading via `importlib.util` in the generated test script, eliminating rigid `import` syntax limitations.
 4. **Sandboxed Subprocess Execution**:
    * **Motive for Subprocess Isolation**: Executing arbitrary LLM-generated code poses severe security and state-corruption risks. We run fixes inside an isolated temp directory (`tempfile.mkdtemp`), using bounded subprocesses with short timeouts. If tests fail, the stderr trace is sent back to the `fix_proposal_node` to retry.
+   * **Full-Repository Sandbox Cloning**: Instead of testing isolated files in a vacuum, the Sandbox engine uses `shutil.copytree` to clone the entire repository context (excluding `.git` and caches) into the ephemeral directory. This ensures cross-file imports and dependencies resolve correctly during `pytest` execution.
+   * **Test Script Syntax Guardrails**: Before execution, `ast.parse` is run on the LLM-generated test script itself as a fail-fast mechanism to avoid spinning up subprocesses for fundamentally malformed tests.
 
 ---
 
