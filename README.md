@@ -20,47 +20,52 @@ This project resolves these challenges by implementing a **Dual-Mode LangGraph S
 
 ---
 
-## 2. System Architecture
+## 2. System Architecture (`agent.ipynb` Graph Topology)
+
+The diagram below reflects the exact state machine graph structure compiled by `build_agent_graph()` in `agent.ipynb`:
 
 ```mermaid
 graph TD
-    A[User Request] --> B[Intent Classifier Node]
-    B -->|Classify Category| C{Category Decision}
-    
-    C -->|QA Category| D[Reasoning Node: ReAct Search Loop]
-    C -->|FIX_PROPOSAL Category| D
+    A[Input User Question] --> B[Intent Classifier Node]
+    B --> C[Reasoning Node]
     
     subgraph ReAct Search Loop
-    D --> E{Action Selected?}
-    E -->|Action: search| F[Tool Node: Hybrid Search Dense+BM25 RRF]
-    F -->|Append Observation| D
-    E -->|Action: Loop Detected| G[Forced Synthesis Engine]
-    G --> H[Final Candidate Answer]
-    E -->|Action: Final Answer| H
+    C --> D{route_reasoning}
+    D -->|action_query is present| E[Tool Node: Hybrid Search Dense+BM25 RRF]
+    E -->|add_edge tool -> reasoning| C
     end
     
-    H --> I{Route by Intent}
+    D -->|final_answer & intent == QA| F[Verifier Node: Grounding Critic]
+    D -->|final_answer & intent == FIX_PROPOSAL| G[Fix Proposal Node]
     
-    subgraph Category 1: QA Path
-    I -->|QA| J[Verifier Agent: Grounding Critic]
-    J --> K{Verdict: SUPPORTED?}
-    K -->|Yes| L[END: Return Grounded Answer]
-    K -.->|No & Retries < 2| D
-    K -->|No & Retries >= 2| M[END: Return Answer with Audit Warning]
+    subgraph QA Verification Path
+    F --> H{route_qa_verification}
+    H -->|is_grounded or attempts >= 2| I[END: Grounded / Audited Answer]
+    H -->|unsupported & attempts < 2| C
     end
     
-    subgraph Category 2: Bug Fix Path
-    I -->|FIX_PROPOSAL| N[Fix Proposal Node: Code Synthesis]
-    N --> O[Execution Verifier Node]
-    O --> P[AST Line Slicing + Symbol Fallback Patching]
-    P --> Q[Dynamic Pytest Script Generator]
-    Q --> R[Sandboxed Subprocess Execution]
-    R --> S{Pytest Result?}
-    S -->|Passed| T[END: Return Verified Patch Report]
-    S -.->|Failed & Retries < 7| N
-    S -->|Failed & Retries >= 7| U[END: Return Failed Verification Report]
+    subgraph Bug Fix Proposal & Execution Verification Path
+    G -->|add_edge fix_proposal -> execution_verifier| J[Execution Verifier Node]
+    J --> K{route_fix_verification}
+    K -->|test passed or attempts >= 7| L[END: Verified Patch / Report]
+    K -->|test failed & attempts < 7| G
     end
 ```
+
+### Exact Graph Routing & State Flow Rules in `agent.ipynb`:
+1. **Entry & ReAct Initialization**: Execution enters at `intent_classifier`, which classifies intent as `QA` or `FIX_PROPOSAL`, then transitions immediately to `reasoning`.
+2. **`route_reasoning` Decision**:
+   - If `action_query` is present -> routes to `tool_node` (`hybrid_search`). `tool_node` appends retrieved observations to `state["history"]` and loops back to `reasoning`.
+   - If `action_query` is `None` AND (`final_answer` is present OR `iterations >= 15`):
+     - If `intent_category == "QA"` -> routes to `verifier_node`.
+     - If `intent_category == "FIX_PROPOSAL"` -> routes to `fix_proposal_node`.
+3. **`route_qa_verification` Decision**:
+   - If `is_grounded == True` OR `verification_attempts >= 2` OR `final_answer is not None` -> routes to `END`.
+   - If `VERDICT: UNSUPPORTED` and `attempts < 2` -> routes back to `reasoning` ("re_reason").
+4. **`route_fix_verification` Decision**:
+   - `fix_proposal` transitions to `execution_verifier`.
+   - If `final_answer is not None` (test passed OR max retries `>= 7` reached) -> routes to `END`.
+   - If test failed and `attempts < 7` -> routes back to `fix_proposal` ("re_fix") with error feedback.
 
 ---
 
@@ -196,7 +201,20 @@ During agent development and execution in `agent.ipynb`, we resolved six core te
 
 ---
 
-## 7. Actual Execution Benchmarks (`agent.ipynb`)
+## 7. Comparative Empirical Experiments Summary
+
+To systematically determine the optimal model allocation per node, we conducted empirical research trials across different LLM parameter classes and providers on NVIDIA NIM endpoints. Below is a breakdown of findings, failures, and architectural insights:
+
+| Trial | Model Allocation Mix | Total Latency (s) | ReAct Search Quality | Verifier Stability | Key Finding / Primary Failure Mode |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Trial 1: Monolithic High-Capacity** | `z-ai/glm-5.2` (All Nodes) | **353.9s** (~5.9m) | Excellent (6 Turns) | 100% Grounded | High precision, but bottlenecked by intent classification overhead. |
+| **Trial 2: Heavy 70B Parameter Mix** | `llama-3.1-8b` / `llama-3.3-70b` | **1,324.0s** (~22.0m) | Good (6 Turns) | Grounded | **Catastrophic Queue Latency**: Shared 70B endpoints suffered ~198s queue wait time per turn. |
+| **Trial 3: Light 8B Uniform Mix** | `llama-3.1-8b` (All Nodes) | **116.6s** (~1.9m) | Failed (15 Turns) | Repetitive Loop | **ReAct Loop Failure**: 8B model repeated identical searches 10 times, inflating prompt context to 15,000 tokens. |
+| **Trial 4: Laguna Multi-Node Baseline** | `poolside/laguna-xs-2.1` (All Nodes) | **225.158s** (~3.7m) | Good (6 Turns) | Verified Patch | **Full Execution Verification**: Tested end-to-end bug fix synthesis and sandboxed pytest verification. |
+
+---
+
+## 8. Actual Execution Benchmarks (`agent.ipynb`)
 
 Below is the exact, un-truncated latency benchmark report generated by `agent.ipynb` during full pipeline execution:
 
@@ -224,7 +242,7 @@ Total Agent Execution Latency: 225.158 seconds
 
 ---
 
-## 8. Technology Stack
+## 9. Technology Stack
 
 * **Agent Orchestration Framework**: `langgraph` (v1.1.9)
 * **AST Parser Engine**: `tree-sitter` (v0.26.0) & `tree-sitter-python` (v0.25.0)
@@ -237,7 +255,7 @@ Total Agent Execution Latency: 225.158 seconds
 
 ---
 
-## 9. Notebook Execution Guide (`agent.ipynb`)
+## 10. Notebook Execution Guide (`agent.ipynb`)
 
 ### Environment & Key Configuration
 Set your required API credentials:
